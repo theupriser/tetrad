@@ -225,10 +225,13 @@ fn the_update_routes_reach_the_device() {
 
     let reply = Reply::UpdateStatus {
         version: "0.1.0".into(),
+        select: Some("5ef24effb50eb865412cc5115497a1c0".into()),
     };
     let (status, response, seen) = exchange(head("GET", "/api/update", "").as_bytes(), reply);
     assert_eq!(status, "HTTP/1.1 200 OK");
-    assert!(response.ends_with(r#"{"version":"0.1.0"}"#));
+    assert!(
+        response.ends_with(r#"{"select":"5ef24effb50eb865412cc5115497a1c0","version":"0.1.0"}"#)
+    );
     assert_eq!(seen, Some(Request::UpdateStatus { pin: pin() }));
 
     let body = r#"{"files":{"bin/tetrad":7,"launcher/tetrad-update.sh":12}}"#;

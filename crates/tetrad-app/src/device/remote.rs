@@ -190,6 +190,7 @@ impl<P: Platform> Device<P> {
             #[cfg(feature = "dev")]
             Request::UpdateStatus { .. } => Reply::UpdateStatus {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
+                select: self.armed_md5(),
             },
             #[cfg(feature = "dev")]
             Request::UpdateBegin { files, .. } => self.remote_update_begin(&files),
@@ -235,6 +236,16 @@ impl<P: Platform> Device<P> {
             }
             Err(reason) => self.remote_update_refused(reason),
         }
+    }
+
+    /// The md5 in `launcher/select`: the binary that the launcher starts.
+    #[cfg(feature = "dev")]
+    fn armed_md5(&mut self) -> Option<String> {
+        use tetrad_services::exec::Files;
+        let path = Path::new(tetrad_services::updater::tetrad::HOME).join("launcher/select");
+        let bytes = (self.platform.services().files().read_bounded(&path, 64)).ok()??;
+        let text = String::from_utf8(bytes).ok()?;
+        Some(text.trim().to_owned())
     }
 
     /// A dev build: UPDATE TETRAD without the touch, for the files that `ready` offered. The
