@@ -187,7 +187,73 @@ impl<P: Platform> Device<P> {
                 Err(reason) => Reply::Refused(reason),
             },
             Request::Upload { name, wav, .. } => self.remote_upload(&name, &wav),
+            #[cfg(feature = "dev")]
+            Request::UpdateStatus { .. } => Reply::UpdateStatus {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+            },
+            #[cfg(feature = "dev")]
+            Request::UpdateBegin { files, .. } => self.remote_update_begin(&files),
+            #[cfg(feature = "dev")]
+            Request::Log { .. } => Reply::Log {
+                text: self.remote_log(),
+            },
+            #[cfg(feature = "dev")]
+            Request::UpdateChunk {
+                path,
+                offset,
+                bytes,
+                ..
+            } => match self.stage_chunk(&path, offset, &bytes) {
+                Ok(received) => Reply::UpdateReceived { path, received },
+                Err(reason) => self.remote_update_refused(reason),
+            },
+            #[cfg(feature = "dev")]
+            Request::UpdateReady { .. } => match self.stage_ready() {
+                Ok(version) => {
+                    let notice = format!("Remote: Tetrad {version} staged; start it on the unit");
+                    self.notice(Subsystem::Remote, notice);
+                    Reply::UpdateStaged { version }
+                }
+                Err(reason) => self.remote_update_refused(reason),
+            },
         }
+    }
+
+    /// A dev build: starts a staging of the update files that the page names
+    /// ([`Device::stage_files_begin`]).
+    #[cfg(feature = "dev")]
+    fn remote_update_begin(&mut self, sizes: &[(String, u64)]) -> Reply {
+        match self.stage_files_begin(sizes) {
+            Ok((version, files)) => {
+                let names: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
+                let notice = format!("Remote: update of {} ({version})", names.join(", "));
+                self.notice(Subsystem::Remote, notice);
+                let files = files.into_iter().map(|f| (f.path, f.size)).collect();
+                Reply::UpdateBegun { version, files }
+            }
+            Err(reason) => self.remote_update_refused(reason),
+        }
+    }
+
+    /// The recent notices as `usb.rs` lists them: the time, the subsystem and the text.
+    #[cfg(feature = "dev")]
+    fn remote_log(&self) -> String {
+        let lines: Vec<String> = (self.state.notices.iter())
+            .map(|notice| {
+                let at = notice.at.as_secs_f64();
+                format!("{at:10.3} {:?}: {}", notice.subsystem, notice.detail)
+            })
+            .collect();
+        lines.join("\n") + "\n"
+    }
+
+    #[cfg(feature = "dev")]
+    fn remote_update_refused(&mut self, reason: String) -> Reply {
+        self.notice(
+            Subsystem::Remote,
+            format!("Remote: update refused: {reason}"),
+        );
+        Reply::Refused(reason)
     }
 
     /// After [`MAX_WRONG_PINS`] wrong PINs: the old PIN no longer works.

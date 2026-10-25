@@ -93,6 +93,7 @@ let queue = Promise.resolve();
 function show(loggedIn, message) {
   $("login").hidden = loggedIn;
   $("upload").hidden = !loggedIn;
+  if (!loggedIn && $("update")) $("update").hidden = true;
   $("login-message").textContent = message || "";
 }
 
@@ -115,6 +116,8 @@ async function connect(candidate) {
     localStorage.setItem(PIN_KEY, pin);
     $("sub").textContent = "Saving to: " + body.folder;
     show(true);
+    // Only a dev build has it (update.html).
+    if (typeof offerUpdate === "function") offerUpdate();
     return;
   }
   forget(body.error);
@@ -252,5 +255,6 @@ window.addEventListener("drop", (event) => event.preventDefault());
 
 if (pin) connect(pin); else show(false);
 </script>
+<!--update-->
 </body>
 </html>

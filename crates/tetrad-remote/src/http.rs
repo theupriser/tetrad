@@ -11,6 +11,19 @@ const MAX_HEADERS: usize = 32;
 pub const MAX_BODY: usize = 64 * 1024;
 
 const PAGE: &str = include_str!("page.html");
+/// Where a dev build puts the update part of the page ([`page`]).
+const UPDATE_MARK: &str = "<!--update-->";
+#[cfg(feature = "dev")]
+const UPDATE_PART: &str = include_str!("update.html");
+
+/// The page: in a dev build with its "Update Tetrad" part.
+fn page() -> String {
+    #[cfg(feature = "dev")]
+    return PAGE.replace(UPDATE_MARK, UPDATE_PART);
+    #[cfg(not(feature = "dev"))]
+    PAGE.replace(UPDATE_MARK, "")
+}
+
 /// Inline script and style only; the page talks to the unit and nothing else.
 const PAGE_POLICY: &str = "default-src 'none'; script-src 'unsafe-inline'; \
     style-src 'unsafe-inline'; connect-src 'self'; img-src data:; form-action 'none'; \
@@ -52,10 +65,21 @@ pub fn serve_one<S: Read + Write>(
             200,
             "text/html; charset=utf-8",
             Some(PAGE_POLICY),
-            PAGE.as_bytes(),
+            page().as_bytes(),
         ),
         Ok(Route::Device(request)) => {
-            let (status, body) = device(request).response();
+            let reply = device(request);
+            #[cfg(feature = "dev")]
+            if let Reply::Log { text } = &reply {
+                return respond(
+                    stream,
+                    200,
+                    "text/plain; charset=utf-8",
+                    None,
+                    text.as_bytes(),
+                );
+            }
+            let (status, body) = reply.response();
             json(stream, status, &body)
         }
         Err(Fail::Status(status, error)) => {
@@ -92,6 +116,51 @@ fn route(head: Head, body: Vec<u8>) -> Result<Route, Fail> {
                 wav: body,
             }))
         }
+        #[cfg(feature = "dev")]
+        ("GET", "/api/update") => Ok(Route::Device(Request::UpdateStatus {
+            pin: device(head.pin)?,
+        })),
+        #[cfg(feature = "dev")]
+        ("POST", "/api/update/begin") => {
+            let pin = device(head.pin)?;
+            let bad = || Fail::Status(400, r#"files: {"path": size, ...} required"#);
+            let value: serde_json::Value = serde_json::from_slice(&body).map_err(|_| bad())?;
+            let files = (value.get("files").and_then(serde_json::Value::as_object))
+                .ok_or_else(bad)?
+                .iter()
+                .map(|(path, size)| Ok((path.clone(), size.as_u64().ok_or_else(bad)?)))
+                .collect::<Result<_, Fail>>()?;
+            Ok(Route::Device(Request::UpdateBegin { pin, files }))
+        }
+        #[cfg(feature = "dev")]
+        ("POST", "/api/update/chunk") => {
+            let pin = device(head.pin)?;
+            let path =
+                query_value(&head.query, "path")?.ok_or(Fail::Status(400, "path required"))?;
+            let offset = query_value(&head.query, "offset")?
+                .and_then(|offset| offset.parse().ok())
+                .ok_or(Fail::Status(400, "offset required"))?;
+            Ok(Route::Device(Request::UpdateChunk {
+                pin,
+                path,
+                offset,
+                bytes: body,
+            }))
+        }
+        #[cfg(feature = "dev")]
+        ("POST", "/api/update/ready") => Ok(Route::Device(Request::UpdateReady {
+            pin: device(head.pin)?,
+        })),
+        #[cfg(feature = "dev")]
+        ("GET", "/api/log") => Ok(Route::Device(Request::Log {
+            pin: device(head.pin)?,
+        })),
+        #[cfg(feature = "dev")]
+        (
+            _,
+            "/api/update" | "/api/update/begin" | "/api/update/chunk" | "/api/update/ready"
+            | "/api/log",
+        ) => Err(Fail::Status(405, "method not allowed")),
         (_, "/api/status" | "/api/irs") => Err(Fail::Status(405, "method not allowed")),
         (_, path) if PAGE_PATHS.contains(&path) => Err(Fail::Status(405, "method not allowed")),
         _ => Err(Fail::Status(404, "not found")),
