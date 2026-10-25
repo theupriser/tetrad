@@ -68,7 +68,18 @@ pub fn serve_one<S: Read + Write>(
             page().as_bytes(),
         ),
         Ok(Route::Device(request)) => {
-            let (status, body) = device(request).response();
+            let reply = device(request);
+            #[cfg(feature = "dev")]
+            if let Reply::Log { text } = &reply {
+                return respond(
+                    stream,
+                    200,
+                    "text/plain; charset=utf-8",
+                    None,
+                    text.as_bytes(),
+                );
+            }
+            let (status, body) = reply.response();
             json(stream, status, &body)
         }
         Err(Fail::Status(status, error)) => {
@@ -112,18 +123,14 @@ fn route(head: Head, body: Vec<u8>) -> Result<Route, Fail> {
         #[cfg(feature = "dev")]
         ("POST", "/api/update/begin") => {
             let pin = device(head.pin)?;
-            let text = |value: &serde_json::Value, key: &str| {
-                (value.get(key).and_then(serde_json::Value::as_str))
-                    .map(str::to_owned)
-                    .ok_or(Fail::Status(400, "manifest and signature required"))
-            };
-            let value: serde_json::Value = serde_json::from_slice(&body)
-                .map_err(|_| Fail::Status(400, "the body is not JSON"))?;
-            Ok(Route::Device(Request::UpdateBegin {
-                pin,
-                manifest: text(&value, "manifest")?,
-                signature: text(&value, "signature")?,
-            }))
+            let bad = || Fail::Status(400, r#"files: {"path": size, ...} required"#);
+            let value: serde_json::Value = serde_json::from_slice(&body).map_err(|_| bad())?;
+            let files = (value.get("files").and_then(serde_json::Value::as_object))
+                .ok_or_else(bad)?
+                .iter()
+                .map(|(path, size)| Ok((path.clone(), size.as_u64().ok_or_else(bad)?)))
+                .collect::<Result<_, Fail>>()?;
+            Ok(Route::Device(Request::UpdateBegin { pin, files }))
         }
         #[cfg(feature = "dev")]
         ("POST", "/api/update/chunk") => {
@@ -145,9 +152,15 @@ fn route(head: Head, body: Vec<u8>) -> Result<Route, Fail> {
             pin: device(head.pin)?,
         })),
         #[cfg(feature = "dev")]
-        (_, "/api/update" | "/api/update/begin" | "/api/update/chunk" | "/api/update/ready") => {
-            Err(Fail::Status(405, "method not allowed"))
-        }
+        ("GET", "/api/log") => Ok(Route::Device(Request::Log {
+            pin: device(head.pin)?,
+        })),
+        #[cfg(feature = "dev")]
+        (
+            _,
+            "/api/update" | "/api/update/begin" | "/api/update/chunk" | "/api/update/ready"
+            | "/api/log",
+        ) => Err(Fail::Status(405, "method not allowed")),
         (_, "/api/status" | "/api/irs") => Err(Fail::Status(405, "method not allowed")),
         (_, path) if PAGE_PATHS.contains(&path) => Err(Fail::Status(405, "method not allowed")),
         _ => Err(Fail::Status(404, "not found")),

@@ -175,46 +175,26 @@ fn a_failed_start_keeps_the_switch_and_turns_off() {
     assert_eq!(files.get(SETTINGS_FILE).unwrap(), br#"{"enabled":false}"#);
 }
 
-/// Update through the Remote page (a dev build, `docs/remote.md`): staged as the USB install is.
+/// Update through the Remote page (a dev build, `docs/remote.md`): unsigned files of the update
+/// set, staged in chunks, checked, and offered on the unit.
 #[cfg(feature = "dev")]
 mod update {
-    use base64::Engine;
-    use ed25519_dalek::{Signer, SigningKey};
-    use sha2::{Digest, Sha256};
-    use tetrad_services::updater::tetrad::{FILES, TRUSTED_KEY};
-
     use super::*;
 
-    /// The test key. A build that trusts it has `TETRAD_RELEASE_PUBKEY` set to its public key
-    /// (the skip message of `a_signed_update_is_staged_in_chunks` prints it).
-    const SEED: [u8; 32] = [9; 32];
     const HOME: &str = "/media/p4/tetrad";
 
-    fn b64(bytes: &[u8]) -> String {
-        base64::engine::general_purpose::STANDARD.encode(bytes)
+    /// A 32-bit little-endian ARM ELF header and `len` bytes in all.
+    fn elf(len: usize) -> Vec<u8> {
+        let mut bytes: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 1;
+        bytes[5] = 1;
+        bytes[18..20].copy_from_slice(&[40, 0]);
+        bytes
     }
 
-    fn contents(path: &str) -> Vec<u8> {
-        (0..300)
-            .map(|i| (i % 251) as u8 ^ path.len() as u8)
-            .collect()
-    }
-
-    /// A manifest of every update file, signed with the test key, and the files.
-    fn signed() -> (String, String) {
-        let files: Vec<String> = (FILES.iter())
-            .map(|path| {
-                let bytes = contents(path);
-                let sha: String = Sha256::digest(&bytes)
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect();
-                format!(r#""{path}":{{"size":{},"sha256":"{sha}"}}"#, bytes.len())
-            })
-            .collect();
-        let manifest = format!(r#"{{"version":"9.9.9","files":{{{}}}}}"#, files.join(","));
-        let signature = SigningKey::from_bytes(&SEED).sign(manifest.as_bytes());
-        (manifest, b64(&signature.to_bytes()))
+    fn script() -> Vec<u8> {
+        b"#!/bin/sh\necho hello\n".to_vec()
     }
 
     fn pin(device: &mut Device<Sim>) -> String {
@@ -222,113 +202,207 @@ mod update {
         view(device).pin.expect("a PIN")
     }
 
-    /// The update steps need the PIN, and a manifest that the key of this build did not sign
-    /// is refused before any file is written.
+    fn begin(pin: &str, files: &[(&str, usize)]) -> Request {
+        Request::UpdateBegin {
+            pin: pin.into(),
+            files: files
+                .iter()
+                .map(|(p, n)| ((*p).into(), *n as u64))
+                .collect(),
+        }
+    }
+
+    /// Sends `bytes` of `path` in pieces of 128 bytes; every chunk is taken at its offset.
+    fn send(device: &mut Device<Sim>, pin: &str, path: &str, bytes: &[u8]) {
+        let mut offset = 0;
+        for piece in bytes.chunks(128) {
+            let request = Request::UpdateChunk {
+                pin: pin.into(),
+                path: path.into(),
+                offset: offset as u64,
+                bytes: piece.to_vec(),
+            };
+            offset += piece.len();
+            let received = offset as u64;
+            let reply = ask(device, request);
+            assert_eq!(
+                reply,
+                Reply::UpdateReceived {
+                    path: path.into(),
+                    received
+                }
+            );
+        }
+    }
+
+    /// The log is behind the PIN and lists the notices, among them what the update did.
     #[test]
-    fn an_update_needs_the_pin_and_the_key_of_the_build() {
+    fn the_log_lists_the_notices() {
+        let (mut device, _media) = boot_remote(media(), MemFiles::default(), FakeRemote::default());
+        let pin = pin(&mut device);
+        assert_eq!(
+            ask(&mut device, Request::Log { pin: "9999".into() }),
+            Reply::WrongPin
+        );
+        ask(&mut device, begin(&pin, &[("bin/tetrad", 200)]));
+        let Reply::Log { text } = ask(&mut device, Request::Log { pin }) else {
+            panic!("the log");
+        };
+        let line = text
+            .lines()
+            .find(|line| line.contains("Remote: update of bin/tetrad"));
+        assert!(line.is_some(), "{text}");
+        assert!(text.ends_with('\n'));
+    }
+
+    fn refused(reply: &Reply) -> &str {
+        match reply {
+            Reply::Refused(reason) => reason,
+            other => panic!("not refused: {other:?}"),
+        }
+    }
+
+    /// The update steps need the PIN, and only the four update files are taken, each within its
+    /// limit, once.
+    #[test]
+    fn an_update_needs_the_pin_and_takes_only_the_update_files() {
         let files = MemFiles::default();
         let (mut device, _media) = boot_remote(media(), files.clone(), FakeRemote::default());
         let pin = pin(&mut device);
-        let wrong = || "9999".to_owned();
-        assert_eq!(
-            ask(&mut device, Request::UpdateStatus { pin: wrong() }),
-            Reply::WrongPin
-        );
+        let wrong = Request::UpdateStatus { pin: "9999".into() };
+        assert_eq!(ask(&mut device, wrong), Reply::WrongPin);
         let version = env!("CARGO_PKG_VERSION").to_owned();
         let status = ask(&mut device, Request::UpdateStatus { pin: pin.clone() });
         assert_eq!(status, Reply::UpdateStatus { version });
 
-        let (manifest, _) = signed();
-        let begin = |signature: &str| Request::UpdateBegin {
-            pin: pin.clone(),
-            manifest: manifest.clone(),
-            signature: signature.into(),
-        };
-        for signature in ["AAAA", &b64(&[0; 64])] {
-            let reply = ask(&mut device, begin(signature));
-            assert!(matches!(reply, Reply::Refused(_)), "{reply:?}");
+        for (case, files) in [
+            ("no files", vec![]),
+            ("not an update file", vec![("launcher/select", 10)]),
+            ("not an update file", vec![("../../etc/passwd", 10)]),
+            ("not an update file", vec![("bin/tetrad.part", 10)]),
+            ("size 0", vec![("bin/tetrad", 0)]),
+            ("size 70000000", vec![("bin/tetrad", 70_000_000)]),
+            ("size 300000", vec![("launcher/tetrad-launch.sh", 300_000)]),
+            ("twice", vec![("bin/tetrad", 5), ("bin/tetrad", 5)]),
+        ] {
+            let reply = ask(&mut device, begin(&pin, &files));
+            assert!(
+                refused(&reply).contains(case.split(' ').next().unwrap()),
+                "{case}: {reply:?}"
+            );
         }
+        // Nothing was started: a chunk and a ready have no staging.
         let chunk = Request::UpdateChunk {
             pin: pin.clone(),
             path: "bin/tetrad".into(),
             offset: 0,
             bytes: vec![1],
         };
-        assert_eq!(
-            ask(&mut device, chunk),
-            Reply::Refused("no install-begin".into())
-        );
+        assert_eq!(refused(&ask(&mut device, chunk)), "no install-begin");
         let ready = ask(&mut device, Request::UpdateReady { pin });
-        assert_eq!(ready, Reply::Refused("no install-begin".into()));
+        assert_eq!(refused(&ready), "no install-begin");
         assert_eq!(files.get(&format!("{HOME}/bin/tetrad.part")), None);
     }
 
-    /// A manifest signed with the key of the build: each file arrives in chunks at the right
-    /// offsets, the `.part` files hold the bytes, and a staging that is over takes no chunk.
+    /// The binary alone: chunks at the right offsets, the `.part` file holds the bytes, and
+    /// the update is offered as the running version with `+http`.
     #[test]
-    fn a_signed_update_is_staged_in_chunks() {
-        let key = b64(&SigningKey::from_bytes(&SEED).verifying_key().to_bytes());
-        if TRUSTED_KEY != key {
-            eprintln!("skipped: build with TETRAD_RELEASE_PUBKEY={key}");
-            return;
-        }
+    fn a_binary_is_staged_in_chunks() {
         let files = MemFiles::default();
         let (mut device, _media) = boot_remote(media(), files.clone(), FakeRemote::default());
         let pin = pin(&mut device);
-        let (manifest, signature) = signed();
-        let begin = |device: &mut Device<Sim>| {
-            let request = Request::UpdateBegin {
-                pin: pin.clone(),
-                manifest: manifest.clone(),
-                signature: signature.clone(),
-            };
-            match ask(device, request) {
-                Reply::UpdateBegun { version, files } => (version, files),
-                other => panic!("a staging: {other:?}"),
-            }
+        let binary = elf(300);
+        let begun = ask(&mut device, begin(&pin, &[("bin/tetrad", 300)]));
+        let version = format!("{}+http", env!("CARGO_PKG_VERSION"));
+        let expected = Reply::UpdateBegun {
+            version: version.clone(),
+            files: vec![("bin/tetrad".into(), 300)],
         };
-        let (version, sizes) = begin(&mut device);
-        assert_eq!(version, "9.9.9");
-        assert_eq!(sizes.len(), FILES.len());
-
-        let chunk = |path: &str, offset: usize, bytes: &[u8]| Request::UpdateChunk {
+        assert_eq!(begun, expected);
+        // An offset that is not the bytes already here, and a file that was not announced.
+        let chunk = |path: &str, offset: u64| Request::UpdateChunk {
             pin: pin.clone(),
             path: path.into(),
-            offset: offset as u64,
-            bytes: bytes.to_vec(),
+            offset,
+            bytes: vec![1],
         };
-        // An offset that is not the bytes already here is refused and writes nothing.
-        let reply = ask(&mut device, chunk("bin/tetrad", 5, &[1]));
-        assert!(matches!(reply, Reply::Refused(_)), "{reply:?}");
-        // A file that the manifest does not list is refused.
-        let reply = ask(&mut device, chunk("bin/other", 0, &[1]));
-        assert!(matches!(reply, Reply::Refused(_)), "{reply:?}");
-        // Not complete yet: the refusal ends this staging (as over USB), so the page begins
-        // again.
-        let ready = ask(&mut device, Request::UpdateReady { pin: pin.clone() });
-        assert!(matches!(ready, Reply::Refused(_)), "{ready:?}");
-        assert_eq!(begin(&mut device).0, "9.9.9");
-
-        for path in FILES {
-            let bytes = contents(path);
-            let mut offset = 0;
-            for piece in bytes.chunks(128) {
-                let reply = ask(&mut device, chunk(path, offset, piece));
-                offset += piece.len();
-                let received = offset as u64;
-                assert_eq!(
-                    reply,
-                    Reply::UpdateReceived {
-                        path: path.into(),
-                        received
-                    }
-                );
-            }
-            assert_eq!(files.get(&format!("{HOME}/{path}.part")).unwrap(), bytes);
-        }
+        assert!(refused(&ask(&mut device, chunk("bin/tetrad", 5))).contains("offset"));
+        assert!(
+            refused(&ask(&mut device, chunk("launcher/tetrad-update.sh", 0))).contains("manifest")
+        );
+        send(&mut device, &pin, "bin/tetrad", &binary);
+        assert_eq!(
+            files.get(&format!("{HOME}/bin/tetrad.part")).unwrap(),
+            binary
+        );
         let staged = ask(&mut device, Request::UpdateReady { pin: pin.clone() });
         assert_eq!(staged, Reply::UpdateStaged { version });
-        let after = ask(&mut device, chunk("bin/tetrad", 300, &[1]));
-        assert_eq!(after, Reply::Refused("no install-begin".into()));
+        // The staging is over.
+        let after = ask(&mut device, chunk("bin/tetrad", 300));
+        assert_eq!(refused(&after), "no install-begin");
+    }
+
+    /// A binary with the scripts, and a script alone, stage the same way.
+    #[test]
+    fn scripts_stage_with_or_without_the_binary() {
+        let files = MemFiles::default();
+        let (mut device, _media) = boot_remote(media(), files.clone(), FakeRemote::default());
+        let pin = pin(&mut device);
+        let sh = script();
+        let all = [
+            ("bin/tetrad", elf(200)),
+            ("launcher/tetrad-launch.sh", sh.clone()),
+            ("launcher/tetrad-launcher.sh", sh.clone()),
+            ("launcher/tetrad-update.sh", sh.clone()),
+        ];
+        let sizes: Vec<_> = all.iter().map(|(p, b)| (*p, b.len())).collect();
+        assert!(matches!(
+            ask(&mut device, begin(&pin, &sizes)),
+            Reply::UpdateBegun { .. }
+        ));
+        for (path, bytes) in &all {
+            send(&mut device, &pin, path, bytes);
+        }
+        let ready = ask(&mut device, Request::UpdateReady { pin: pin.clone() });
+        assert!(matches!(ready, Reply::UpdateStaged { .. }), "{ready:?}");
+        for (path, bytes) in &all {
+            assert_eq!(&files.get(&format!("{HOME}/{path}.part")).unwrap(), bytes);
+        }
+
+        let only = [("launcher/tetrad-launcher.sh", sh.len())];
+        assert!(matches!(
+            ask(&mut device, begin(&pin, &only)),
+            Reply::UpdateBegun { .. }
+        ));
+        send(&mut device, &pin, "launcher/tetrad-launcher.sh", &sh);
+        let ready = ask(&mut device, Request::UpdateReady { pin });
+        assert!(matches!(ready, Reply::UpdateStaged { .. }), "{ready:?}");
+    }
+
+    /// A file that is not an ARM executable never reaches the install, and an incomplete file
+    /// ends the staging.
+    #[test]
+    fn a_wrong_binary_or_an_incomplete_file_is_refused() {
+        let files = MemFiles::default();
+        let (mut device, _media) = boot_remote(media(), files.clone(), FakeRemote::default());
+        let pin = pin(&mut device);
+        let mut x86 = elf(200);
+        x86[18] = 62;
+        assert!(matches!(
+            ask(&mut device, begin(&pin, &[("bin/tetrad", 200)])),
+            Reply::UpdateBegun { .. }
+        ));
+        send(&mut device, &pin, "bin/tetrad", &x86);
+        let ready = ask(&mut device, Request::UpdateReady { pin: pin.clone() });
+        assert!(refused(&ready).contains("ARM"), "{ready:?}");
+        assert_eq!(files.get(&format!("{HOME}/bin/tetrad.part")), None);
+
+        assert!(matches!(
+            ask(&mut device, begin(&pin, &[("bin/tetrad", 200)])),
+            Reply::UpdateBegun { .. }
+        ));
+        send(&mut device, &pin, "bin/tetrad", &elf(200)[..100]);
+        let ready = ask(&mut device, Request::UpdateReady { pin });
+        assert!(refused(&ready).contains("100"), "{ready:?}");
     }
 }

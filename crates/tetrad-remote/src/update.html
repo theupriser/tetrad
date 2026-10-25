@@ -3,9 +3,9 @@
     <h2>Update Tetrad</h2>
     <p class="sub" id="update-version"></p>
     <label class="drop" id="update-drop">
-      <strong>Drop the update files here</strong>
-      or tap to choose all six: <code>tetrad</code>, the three <code>tetrad-*.sh</code> scripts,
-      <code>tetrad-update.json</code> and <code>tetrad-update.json.sig</code>.
+      <strong>Drop the update archive here</strong>
+      or tap to choose <code>tetrad-update.tar.gz</code>, or the files in it:
+      <code>tetrad</code> and the <code>tetrad-*.sh</code> launcher scripts.
       <input id="update-files" type="file" multiple>
     </label>
     <progress id="update-progress" max="1" value="0" hidden></progress>
@@ -13,91 +13,126 @@
   </section>
 </main>
 <style>
-    #update { margin-top: 40px; }
-    #update h2 { margin: 0; font-size: 22px; text-transform: uppercase; }
-    #update progress { width: 100%; margin-top: 16px; }
-    #update .message.ok { color: var(--good); }
+#update { margin-top: 40px; }
+#update h2 { margin: 0; font-size: 22px; text-transform: uppercase; }
+#update progress { width: 100%; margin-top: 16px; }
+#update .message.ok { color: var(--good); }
 </style>
 <script>
-  "use strict";
-  // The update files of a dev build (docs/remote.md, "Update Tetrad"). The unit checks the
-  // signature of the manifest with the key of its build and each file against the manifest;
-  // nothing installs until someone touches UPDATE TETRAD on the unit.
-  const UPDATE_CHUNK = 48 * 1024;
-  let updating = false;
+"use strict";
+// Update files of a dev build (docs/remote.md, "Update Tetrad"). Nobody signs them: the unit
+// takes only these four files, checks them, and installs only after someone touches UPDATE
+// TETRAD on the unit.
+const UPDATE_CHUNK = 48 * 1024;
+const UPDATE_PATHS = {
+  "tetrad": "bin/tetrad",
+  "tetrad-launch.sh": "launcher/tetrad-launch.sh",
+  "tetrad-launcher.sh": "launcher/tetrad-launcher.sh",
+  "tetrad-update.sh": "launcher/tetrad-update.sh",
+};
+let updating = false;
 
-  function updateMessage(text, ok) {
-    $("update-message").textContent = text;
-    $("update-message").className = "message" + (ok ? " ok" : "");
-  }
+function updateMessage(text, ok) {
+  $("update-message").textContent = text;
+  $("update-message").className = "message" + (ok ? " ok" : "");
+}
 
-  async function offerUpdate() {
-    const { status, body } = await call("/api/update");
-    $("update").hidden = status !== 200;
-    if (status === 200) $("update-version").textContent = "The unit runs Tetrad " + body.version + ".";
-  }
+async function offerUpdate() {
+  const { status, body } = await call("/api/update");
+  $("update").hidden = status !== 200;
+  if (status === 200) $("update-version").textContent = "The unit runs Tetrad " + body.version + ".";
+}
 
-  async function updateStep(path, options) {
-    const { status, body } = await call(path, options);
-    if (status === 401) forget("Enter the PIN shown on the unit");
-    if (status !== 200) throw new Error(body.error || "Failed");
-    return body;
-  }
+async function updateStep(path, options) {
+  const { status, body } = await call(path, options);
+  if (status === 401) forget("Enter the PIN shown on the unit");
+  if (status !== 200) throw new Error(body.error || "Failed");
+  return body;
+}
 
-  async function sendUpdate(list) {
-    if (updating) return;
-    updating = true;
-    const bar = $("update-progress");
-    try {
-      const byName = new Map(Array.from(list, (file) => [file.name, file]));
-      const manifest = byName.get("tetrad-update.json");
-      const signature = byName.get("tetrad-update.json.sig");
-      if (!manifest || !signature) throw new Error("tetrad-update.json and tetrad-update.json.sig are needed");
-      updateMessage("Checking the signature…");
-      const begun = await updateStep("/api/update/begin", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ manifest: await manifest.text(), signature: await signature.text() }),
-      });
-      const total = begun.files.reduce((sum, file) => sum + file.size, 0);
-      let sent = 0;
-      bar.hidden = false;
-      for (const { path, size } of begun.files) {
-        const name = path.slice(path.lastIndexOf("/") + 1);
-        const file = byName.get(name);
-        if (!file) throw new Error(name + " is missing");
-        if (file.size !== size) throw new Error(name + " has " + file.size + " bytes, not " + size);
-        for (let offset = 0; offset < size; offset += UPDATE_CHUNK) {
-          updateMessage("Sending " + name + "…");
-          await updateStep("/api/update/chunk?path=" + encodeURIComponent(path) + "&offset=" + offset, {
-            method: "POST",
-            headers: { "Content-Type": "application/octet-stream" },
-            body: file.slice(offset, offset + UPDATE_CHUNK),
-          });
-          sent += Math.min(UPDATE_CHUNK, size - offset);
-          bar.value = total ? sent / total : 1;
-        }
-      }
-      const staged = await updateStep("/api/update/ready", { method: "POST", body: "" });
-      updateMessage("Tetrad " + staged.version + " is on the unit. Touch UPDATE TETRAD on the unit to install it.", true);
-    } catch (error) {
-      updateMessage(error.message);
-    } finally {
-      bar.hidden = true;
-      updating = false;
+/** The regular files of a tar.gz as File objects named by their base name. */
+async function unpack(archive) {
+  if (typeof DecompressionStream !== "function") throw new Error("This browser cannot open .tar.gz files; choose the files in it");
+  const stream = archive.stream().pipeThrough(new DecompressionStream("gzip"));
+  const tar = new Uint8Array(await new Response(stream).arrayBuffer());
+  const text = (at, length) => {
+    const end = tar.indexOf(0, at);
+    return new TextDecoder().decode(tar.subarray(at, end < 0 || end > at + length ? at + length : end));
+  };
+  const files = [];
+  for (let at = 0; at + 512 <= tar.length && tar[at] !== 0; ) {
+    const name = text(at, 100);
+    const size = parseInt(text(at + 124, 12).trim() || "0", 8);
+    const type = tar[at + 156];
+    // A regular file is "0" or NUL. A directory ("5") or a pax header ("x", "g") has nothing to take.
+    if (type === 0x30 || type === 0) {
+      files.push(new File([tar.subarray(at + 512, at + 512 + size)], name.slice(name.lastIndexOf("/") + 1)));
     }
+    at += 512 + Math.ceil(size / 512) * 512;
   }
+  return files;
+}
 
-  $("update-files").addEventListener("change", (event) => {
-    sendUpdate(event.target.files);
-    event.target.value = "";
-  });
-  const updateDrop = $("update-drop");
-  updateDrop.addEventListener("dragover", (event) => { event.preventDefault(); updateDrop.classList.add("over"); });
-  updateDrop.addEventListener("dragleave", () => updateDrop.classList.remove("over"));
-  updateDrop.addEventListener("drop", (event) => {
-    event.preventDefault();
-    updateDrop.classList.remove("over");
-    sendUpdate(event.dataTransfer.files);
-  });
-  </script>
+async function sendUpdate(list) {
+  if (updating) return;
+  updating = true;
+  const bar = $("update-progress");
+  try {
+    let files = [];
+    for (const file of list) {
+      if (/\.(tar\.gz|tgz)$/.test(file.name)) files.push(...await unpack(file));
+      else files.push(file);
+    }
+    if (!files.length) throw new Error("No files");
+    const sizes = {};
+    for (const file of files) {
+      const path = UPDATE_PATHS[file.name];
+      if (!path) throw new Error(file.name + " is not an update file");
+      if (path in sizes) throw new Error(file.name + " twice");
+      sizes[path] = file.size;
+    }
+    updateMessage("Starting…");
+    await updateStep("/api/update/begin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files: sizes }),
+    });
+    const total = files.reduce((sum, file) => sum + file.size, 0);
+    let sent = 0;
+    bar.hidden = false;
+    for (const file of files) {
+      const path = UPDATE_PATHS[file.name];
+      for (let offset = 0; offset < file.size; offset += UPDATE_CHUNK) {
+        updateMessage("Sending " + file.name + "…");
+        await updateStep("/api/update/chunk?path=" + encodeURIComponent(path) + "&offset=" + offset, {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: file.slice(offset, offset + UPDATE_CHUNK),
+        });
+        sent += Math.min(UPDATE_CHUNK, file.size - offset);
+        bar.value = total ? sent / total : 1;
+      }
+    }
+    const staged = await updateStep("/api/update/ready", { method: "POST", body: "" });
+    updateMessage("Ready (" + files.map((file) => file.name).join(", ") + "). Touch UPDATE TETRAD on the unit to install " + staged.version + ".", true);
+  } catch (error) {
+    updateMessage(error.message);
+  } finally {
+    bar.hidden = true;
+    updating = false;
+  }
+}
+
+$("update-files").addEventListener("change", (event) => {
+  sendUpdate(event.target.files);
+  event.target.value = "";
+});
+const updateDrop = $("update-drop");
+updateDrop.addEventListener("dragover", (event) => { event.preventDefault(); updateDrop.classList.add("over"); });
+updateDrop.addEventListener("dragleave", () => updateDrop.classList.remove("over"));
+updateDrop.addEventListener("drop", (event) => {
+  event.preventDefault();
+  updateDrop.classList.remove("over");
+  sendUpdate(event.dataTransfer.files);
+});
+</script>

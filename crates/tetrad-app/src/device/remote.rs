@@ -192,11 +192,11 @@ impl<P: Platform> Device<P> {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             },
             #[cfg(feature = "dev")]
-            Request::UpdateBegin {
-                manifest,
-                signature,
-                ..
-            } => self.remote_update_begin(&manifest, &signature),
+            Request::UpdateBegin { files, .. } => self.remote_update_begin(&files),
+            #[cfg(feature = "dev")]
+            Request::Log { .. } => Reply::Log {
+                text: self.remote_log(),
+            },
             #[cfg(feature = "dev")]
             Request::UpdateChunk {
                 path,
@@ -219,21 +219,32 @@ impl<P: Platform> Device<P> {
         }
     }
 
-    /// A dev build: starts a staging of the files that the signed manifest lists
-    /// ([`Device::stage_begin`], as the USB install does).
+    /// A dev build: starts a staging of the update files that the page names
+    /// ([`Device::stage_files_begin`]).
     #[cfg(feature = "dev")]
-    fn remote_update_begin(&mut self, manifest: &str, signature: &str) -> Reply {
-        match self.stage_begin(manifest, signature) {
+    fn remote_update_begin(&mut self, sizes: &[(String, u64)]) -> Reply {
+        match self.stage_files_begin(sizes) {
             Ok((version, files)) => {
-                self.notice(
-                    Subsystem::Remote,
-                    format!("Remote: Tetrad {version} update"),
-                );
+                let names: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
+                let notice = format!("Remote: update of {} ({version})", names.join(", "));
+                self.notice(Subsystem::Remote, notice);
                 let files = files.into_iter().map(|f| (f.path, f.size)).collect();
                 Reply::UpdateBegun { version, files }
             }
             Err(reason) => self.remote_update_refused(reason),
         }
+    }
+
+    /// The recent notices as `usb.rs` lists them: the time, the subsystem and the text.
+    #[cfg(feature = "dev")]
+    fn remote_log(&self) -> String {
+        let lines: Vec<String> = (self.state.notices.iter())
+            .map(|notice| {
+                let at = notice.at.as_secs_f64();
+                format!("{at:10.3} {:?}: {}", notice.subsystem, notice.detail)
+            })
+            .collect();
+        lines.join("\n") + "\n"
     }
 
     #[cfg(feature = "dev")]

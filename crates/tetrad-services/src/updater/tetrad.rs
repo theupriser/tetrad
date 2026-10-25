@@ -70,7 +70,8 @@ const RELEASES_PER_PAGE: u8 = 30;
 const MAX_RELEASES_BYTES: usize = 4 << 20;
 const MAX_MANIFEST_BYTES: usize = 64 << 10;
 const MAX_SIGNATURE_BYTES: usize = 1 << 10;
-const MAX_BINARY_BYTES: u64 = 64 << 20;
+/// The largest `bin/tetrad` that an update takes.
+pub const MAX_BINARY_BYTES: u64 = 64 << 20;
 const MAX_SCRIPT_BYTES: u64 = 256 << 10;
 const API_TIMEOUT: Duration = Duration::from_secs(30);
 const FILE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -171,6 +172,26 @@ impl Manifest {
         }
         Ok(manifest)
     }
+}
+
+/// The largest size of update file `path`, or `None` when it is not one of [`FILES`].
+pub fn max_bytes(path: &str) -> Option<u64> {
+    match path {
+        BINARY => Some(MAX_BINARY_BYTES),
+        _ if FILES.contains(&path) => Some(MAX_SCRIPT_BYTES),
+        _ => None,
+    }
+}
+
+/// The manifest of an update of some of the [`FILES`], which the unit makes from the files that
+/// the Remote page of a dev build staged (docs/remote.md). Nobody signs it, and the user starts
+/// the install on the unit. The version is `running` with the build metadata `+http`: the
+/// version of a new binary is not known before it runs, and the unit does not run it before the
+/// install.
+pub fn staged_manifest(running: &Version, files: BTreeMap<String, FileEntry>) -> Manifest {
+    let mut version = running.clone();
+    version.build = semver::BuildMetadata::new("http").unwrap_or_default();
+    Manifest { version, files }
 }
 
 /// Where the files of an [`Offer`] come from.
@@ -321,7 +342,7 @@ pub fn install(
     }
     let staged = stage(http, files, runner, offer);
     if staged.is_err() {
-        for path in FILES {
+        for path in offer.manifest.files.keys() {
             let _ = files.remove(&part(path));
         }
         return staged;
@@ -330,7 +351,7 @@ pub fn install(
     // old md5, so the launcher starts stock CorOS until `tetrad-launcher.sh arm` runs. The
     // downloads are synced first, so a power cut never leaves a renamed file half written.
     files.sync()?;
-    for path in FILES {
+    for path in offer.manifest.files.keys() {
         files.rename(&part(path), &home(path))?;
     }
     files.sync()?;
@@ -372,27 +393,35 @@ fn stage(
             return Err(TetradUpdateError::Hash(path.clone()));
         }
     }
-    let parts: Vec<String> = FILES
-        .iter()
-        .map(|path| part(path).display().to_string())
+    // The files of the offer: all four of a release, or the binary alone ([`binary_manifest`]).
+    let parts: Vec<(&String, String)> = (offer.manifest.files.keys())
+        .map(|path| (path, part(path).display().to_string()))
         .collect();
     run(
         runner,
         &Command::new(
             "chmod",
-            ["755"].into_iter().chain(parts.iter().map(String::as_str)),
+            ["755"]
+                .into_iter()
+                .chain(parts.iter().map(|(_, file)| file.as_str())),
         ),
     )?;
-    for (path, file) in FILES.iter().zip(&parts).skip(1) {
+    for (path, file) in parts.iter().filter(|(path, _)| *path != BINARY) {
         if !runner
             .run(&Command::new("sh", ["-n", file.as_str()]))?
             .status
             .success()
         {
-            return Err(TetradUpdateError::Script((*path).to_owned()));
+            return Err(TetradUpdateError::Script((*path).clone()));
         }
     }
-    let check = Command::new(&parts[0], ["run", "--check"]).cwd(SCRIPT_DIR);
+    // Scripts alone: the installed binary is checked, as the scripts will start it.
+    let binary = if offer.manifest.files.contains_key(BINARY) {
+        part(BINARY)
+    } else {
+        home(BINARY)
+    };
+    let check = Command::new(&binary.display().to_string(), ["run", "--check"]).cwd(SCRIPT_DIR);
     match runner.run(&check)?.status {
         status if status.success() => Ok(()),
         ExitStatus::Code(4) => Err(TetradUpdateError::Unsupported(offer.version().clone())),
@@ -585,6 +614,107 @@ mod tests {
             files.get("/media/p4/tetrad/bin/tetrad").as_deref(),
             Some(&b"new-elf"[..])
         );
+    }
+
+    fn entry(bytes: &[u8]) -> FileEntry {
+        let sha256: String = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        FileEntry {
+            size: bytes.len() as u64,
+            sha256,
+        }
+    }
+
+    /// A staged offer (the Remote page of a dev build) moves only the files it lists, checks
+    /// them, arms, and leaves the other files alone.
+    #[test]
+    fn a_staged_offer_installs_just_its_files() {
+        let files = MemFiles::default();
+        files.put("/media/p4/tetrad/bin/tetrad", "old");
+        files.put("/media/p4/tetrad/launcher/tetrad-launcher.sh", "launcher");
+        files.put("/media/p4/tetrad/bin/tetrad.part", "new-elf");
+        let manifest = staged_manifest(
+            &v("0.1.0-alpha.8"),
+            BTreeMap::from([(BINARY.to_owned(), entry(b"new-elf"))]),
+        );
+        assert_eq!(manifest.version.to_string(), "0.1.0-alpha.8+http");
+        let offer = Offer {
+            source: Source::Usb,
+            manifest,
+        };
+        let mut http = ScriptedHttp::sharing(files.clone());
+        let mut runner = ScriptedRunner::default();
+        runner.expect_ok("chmod 755 /media/p4/tetrad/bin/tetrad.part");
+        runner.expect(
+            "/media/p4/tetrad/bin/tetrad.part run --check",
+            Ok(Output::code(0)),
+        );
+        runner.expect_ok("sh /media/p4/tetrad/launcher/tetrad-launcher.sh arm");
+        install(&mut http, &mut files.clone(), &mut runner, &offer).unwrap();
+        assert!(runner.is_done());
+        assert!(http.requests.is_empty());
+        assert_eq!(
+            files.get("/media/p4/tetrad/bin/tetrad").as_deref(),
+            Some(&b"new-elf"[..])
+        );
+        assert_eq!(
+            files
+                .get("/media/p4/tetrad/launcher/tetrad-launcher.sh")
+                .as_deref(),
+            Some(&b"launcher"[..])
+        );
+        assert_eq!(files.get("/media/p4/tetrad/bin/tetrad.part"), None);
+    }
+
+    /// Scripts alone: each must parse, the installed binary is checked, only the scripts move.
+    #[test]
+    fn a_scripts_only_offer_checks_the_installed_binary() {
+        let files = MemFiles::default();
+        files.put("/media/p4/tetrad/bin/tetrad", "installed");
+        let launcher = "/media/p4/tetrad/launcher/tetrad-launcher.sh";
+        files.put(&format!("{launcher}.part"), "new launcher");
+        let manifest = staged_manifest(
+            &v("0.1.0"),
+            BTreeMap::from([(
+                "launcher/tetrad-launcher.sh".to_owned(),
+                entry(b"new launcher"),
+            )]),
+        );
+        let offer = Offer {
+            source: Source::Usb,
+            manifest,
+        };
+        let mut runner = ScriptedRunner::default();
+        runner.expect_ok(&format!("chmod 755 {launcher}.part"));
+        runner.expect_ok(&format!("sh -n {launcher}.part"));
+        runner.expect(
+            "/media/p4/tetrad/bin/tetrad run --check",
+            Ok(Output::code(0)),
+        );
+        runner.expect_ok(&format!("sh {launcher} arm"));
+        let mut http = ScriptedHttp::sharing(files.clone());
+        install(&mut http, &mut files.clone(), &mut runner, &offer).unwrap();
+        assert!(runner.is_done());
+        assert_eq!(files.get(launcher).as_deref(), Some(&b"new launcher"[..]));
+        assert_eq!(
+            files.get("/media/p4/tetrad/bin/tetrad").as_deref(),
+            Some(&b"installed"[..])
+        );
+    }
+
+    /// Only the four update files have a size limit.
+    #[test]
+    fn only_update_files_have_a_limit() {
+        assert_eq!(max_bytes("bin/tetrad"), Some(MAX_BINARY_BYTES));
+        assert_eq!(
+            max_bytes("launcher/tetrad-update.sh"),
+            Some(MAX_SCRIPT_BYTES)
+        );
+        for path in ["launcher/select", "../etc/passwd", "bin/tetrad.part", ""] {
+            assert_eq!(max_bytes(path), None, "{path}");
+        }
     }
 
     /// A wrong hash or an unsupported CorOS build removes the `.part` files and keeps the old

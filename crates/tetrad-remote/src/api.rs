@@ -18,12 +18,12 @@ pub enum Request {
     /// Dev build: the running version, and the proof that the unit takes updates.
     #[cfg(feature = "dev")]
     UpdateStatus { pin: String },
-    /// Dev build: the signed manifest and its signature, as the Tetrad updater reads them.
+    /// Dev build: the update files to send, each as its path under the Tetrad folder and its
+    /// size (`bin/tetrad`, `launcher/tetrad-launcher.sh`, ...). Nothing signs them.
     #[cfg(feature = "dev")]
     UpdateBegin {
         pin: String,
-        manifest: String,
-        signature: String,
+        files: Vec<(String, u64)>,
     },
     /// Dev build: the next bytes of manifest file `path`, which must start at `offset`.
     #[cfg(feature = "dev")]
@@ -36,6 +36,9 @@ pub enum Request {
     /// Dev build: every file is here; offer the install on the unit.
     #[cfg(feature = "dev")]
     UpdateReady { pin: String },
+    /// Dev build: the recent notices of the unit, as plain text.
+    #[cfg(feature = "dev")]
+    Log { pin: String },
 }
 
 impl Request {
@@ -46,7 +49,8 @@ impl Request {
             Self::UpdateStatus { pin }
             | Self::UpdateBegin { pin, .. }
             | Self::UpdateChunk { pin, .. }
-            | Self::UpdateReady { pin } => pin,
+            | Self::UpdateReady { pin }
+            | Self::Log { pin } => pin,
         }
     }
 }
@@ -71,7 +75,7 @@ pub enum Reply {
     UpdateStatus {
         version: String,
     },
-    /// The manifest is signed with the key of this build: the files to send, with their sizes.
+    /// The unit takes these files: the version it would offer, and the files with their sizes.
     #[cfg(feature = "dev")]
     UpdateBegun {
         version: String,
@@ -85,6 +89,11 @@ pub enum Reply {
     #[cfg(feature = "dev")]
     UpdateStaged {
         version: String,
+    },
+    /// The notices of the unit, one per line (the answer is `text/plain`).
+    #[cfg(feature = "dev")]
+    Log {
+        text: String,
     },
     WrongPin,
     Off,
@@ -115,6 +124,8 @@ impl Reply {
             }
             #[cfg(feature = "dev")]
             Self::UpdateStaged { version } => (200, json!({ "version": version })),
+            #[cfg(feature = "dev")]
+            Self::Log { text } => (200, json!({ "log": text })),
             Self::WrongPin => (401, json!({ "error": "Wrong PIN" })),
             Self::Off => (503, json!({ "error": "Remote is off" })),
             Self::Refused(reason) => (422, json!({ "error": reason })),

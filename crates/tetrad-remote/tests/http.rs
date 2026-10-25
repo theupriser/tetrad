@@ -231,21 +231,25 @@ fn the_update_routes_reach_the_device() {
     assert!(response.ends_with(r#"{"version":"0.1.0"}"#));
     assert_eq!(seen, Some(Request::UpdateStatus { pin: pin() }));
 
-    let body = r#"{"manifest":"{\"version\":\"1.0.0\"}","signature":"c2ln"}"#;
+    let body = r#"{"files":{"bin/tetrad":7,"launcher/tetrad-update.sh":12}}"#;
     let begun = Reply::UpdateBegun {
-        version: "1.0.0".into(),
+        version: "1.0.0+http".into(),
         files: vec![("bin/tetrad".into(), 7)],
     };
     let (status, response, seen) =
         exchange(head("POST", "/api/update/begin", body).as_bytes(), begun);
     assert_eq!(status, "HTTP/1.1 200 OK");
-    assert!(response.ends_with(r#"{"files":[{"path":"bin/tetrad","size":7}],"version":"1.0.0"}"#));
+    assert!(
+        response.ends_with(r#"{"files":[{"path":"bin/tetrad","size":7}],"version":"1.0.0+http"}"#)
+    );
     assert_eq!(
         seen,
         Some(Request::UpdateBegin {
             pin: pin(),
-            manifest: r#"{"version":"1.0.0"}"#.into(),
-            signature: "c2ln".into(),
+            files: vec![
+                ("bin/tetrad".into(), 7),
+                ("launcher/tetrad-update.sh".into(), 12)
+            ],
         })
     );
 
@@ -280,7 +284,7 @@ fn the_update_routes_reach_the_device() {
     assert!(response.ends_with(r#"{"error":"no install-begin"}"#));
 }
 
-/// The update routes need the PIN, a JSON body and a numeric offset, and take no other method.
+/// The update routes need the PIN, a file list as JSON and a numeric offset, and take no other method.
 #[cfg(feature = "dev")]
 #[test]
 fn the_update_routes_check_their_input() {
@@ -298,6 +302,8 @@ fn the_update_routes_check_their_input() {
     for (path, body) in [
         ("/api/update/begin", "not json"),
         ("/api/update/begin", r#"{"manifest":"{}"}"#),
+        ("/api/update/begin", r#"{"files":{"bin/tetrad":"big"}}"#),
+        ("/api/update/begin", r#"{"files":["bin/tetrad"]}"#),
         ("/api/update/chunk?path=bin%2Ftetrad&offset=x", ""),
         ("/api/update/chunk?offset=0", ""),
     ] {
@@ -323,4 +329,25 @@ fn only_a_dev_page_offers_the_update() {
         assert_eq!(status, "HTTP/1.1 404 Not Found");
         assert_eq!(seen, None);
     }
+}
+
+/// The log of the unit is plain text, one notice per line, behind the PIN (a dev build).
+#[cfg(feature = "dev")]
+#[test]
+fn the_log_is_plain_text_behind_the_pin() {
+    let request = b"GET /api/log HTTP/1.1\r\nHost: 192.168.1.20\r\nX-Tetrad-Pin: 4821\r\n\r\n";
+    let text = "    12.500 Remote: update of bin/tetrad\n    13.000 Usb: hello\n";
+    let reply = Reply::Log { text: text.into() };
+    let (status, response, seen) = exchange(request, reply);
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(response.contains("Content-Type: text/plain; charset=utf-8"));
+    assert!(response.ends_with(text));
+    assert_eq!(seen, Some(Request::Log { pin: "4821".into() }));
+
+    let (status, _, seen) = exchange(
+        b"GET /api/log HTTP/1.1\r\nHost: 192.168.1.20\r\n\r\n",
+        Reply::Off,
+    );
+    assert_eq!(status, "HTTP/1.1 401 Unauthorized");
+    assert_eq!(seen, None);
 }

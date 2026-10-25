@@ -12,13 +12,22 @@
 #       DIR holds the `tetrad` binary of the build. Adds the three launcher scripts,
 #       tetrad-update.json (the version of Cargo.toml, and the size and SHA-256 of each file) and
 #       tetrad-update.json.sig (its Ed25519 signature). Send the six files.
-#   dev-update.sh push DIR HOST PIN
-#       Sends the six files of DIR to the Remote page of a dev build, as the page does: HOST is
+#   dev-update.sh archive BINARY [--scripts] [OUT]
+#       Makes OUT (default tetrad-update.tar.gz, beside BINARY): one file with the `tetrad`
+#       binary, and with --scripts the three launcher scripts of this checkout. This is what a
+#       dev build takes over Wi-Fi: unsigned, so it needs no key. scripts/build-dev.sh makes it
+#       after each build.
+#   dev-update.sh push ARCHIVE HOST PIN
+#       Sends the files of ARCHIVE to the Remote page of a dev build, as the page does: HOST is
 #       the IP address of the unit, PIN the one that Settings > System > Remote shows. Touch
-#       UPDATE TETRAD on the unit after it. `dev-update.sh pack` and `push` in a row make an
-#       update with no browser.
+#       UPDATE TETRAD on the unit after it.
+#   dev-update.sh log HOST PIN
+#       Prints the recent notices of the unit (the log), over the same Remote page of a dev
+#       build.
 #
-# Needs OpenSSL 3 (Ed25519 raw signing), base64, and sha256sum or shasum; push needs curl.
+# `key` and `pack` are for builds with their own signing key, which `tetrad-usb install` takes
+# over USB; `archive` and `push` need no key.
+# Needs OpenSSL 3 (key, pack), base64, sha256sum or shasum (pack), tar, and curl (push).
 set -eu
 
 here=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -26,7 +35,7 @@ repo=$(cd -- "$here/.." && pwd)
 scripts="tetrad-launch.sh tetrad-launcher.sh tetrad-update.sh"
 
 fail() { echo "dev-update: $*" >&2; exit 1; }
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 sha256() {
     if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -c1-64
@@ -88,28 +97,75 @@ case ${1:-} in
         echo "tetrad $version: signed with the key $(public_key "$key")" >&2
         echo "send these files of $dir: tetrad $scripts tetrad-update.json tetrad-update.json.sig" >&2
         ;;
+    log)
+        [ $# -eq 3 ] || usage
+        host=$2
+        pin=$3
+        command -v curl >/dev/null || fail "log needs curl"
+        reply=$(mktemp)
+        trap 'rm -f "$reply"' EXIT
+        call GET /api/log
+        cat "$reply"
+        ;;
+    archive)
+        [ $# -ge 2 ] || usage
+        binary=$2
+        shift 2
+        with_scripts=
+        out=
+        for arg in "$@"; do
+            case $arg in
+                --scripts) with_scripts=yes ;;
+                *) [ -z "$out" ] || usage; out=$arg ;;
+            esac
+        done
+        [ -f "$binary" ] || fail "no $binary"
+        [ -n "$out" ] || out=$(cd -- "$(dirname -- "$binary")" && pwd)/tetrad-update.tar.gz
+        tmp=$(mktemp -d)
+        trap 'rm -rf "$tmp"' EXIT
+        install -m 755 "$binary" "$tmp/tetrad"
+        names=tetrad
+        if [ -n "$with_scripts" ]; then
+            for s in $scripts; do
+                install -m 755 "$repo/scripts/launcher/$s" "$tmp/$s"
+            done
+            names="tetrad $scripts"
+        fi
+        # shellcheck disable=SC2086 # names is a list of file names without spaces
+        tar -C "$tmp" --owner=0 --group=0 --numeric-owner -czf "$out" $names
+        echo "$out: $names ($(size "$out") bytes)" >&2
+        ;;
     push)
         [ $# -eq 4 ] || usage
-        dir=$2
+        archive=$2
         host=$3
         pin=$4
         command -v curl >/dev/null || fail "push needs curl"
-        for name in tetrad $scripts tetrad-update.json tetrad-update.json.sig; do
-            [ -f "$dir/$name" ] || fail "no $dir/$name (dev-update.sh pack makes it)"
-        done
+        [ -f "$archive" ] || fail "no $archive"
         tmp=$(mktemp -d)
         trap 'rm -rf "$tmp"' EXIT
         reply=$tmp/reply
         chunk=$tmp/chunk
+        mkdir "$tmp/files"
+        tar -C "$tmp/files" -xzf "$archive" || fail "$archive is not a tar.gz"
+        # The four update files by their base names; the unit takes no other.
+        list=
+        for name in tetrad $scripts; do
+            [ -f "$tmp/files/$name" ] || continue
+            case $name in tetrad) path=bin/tetrad ;; *) path=launcher/$name ;; esac
+            list="$list $path"
+        done
+        [ -n "$list" ] || fail "$archive has none of: tetrad $scripts"
         call GET /api/update
         echo "the unit runs Tetrad $(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$reply")" >&2
-        # The manifest is JSON text inside the JSON body: escape \ and ".
-        escaped=$(sed 's/\\/\\\\/g; s/"/\\"/g' "$dir/tetrad-update.json" | tr -d '\n')
-        printf '{"manifest":"%s","signature":"%s"}' "$escaped" \
-            "$(tr -d '\n' <"$dir/tetrad-update.json.sig")" >"$tmp/begin"
+        sizes=
+        for path in $list; do
+            sizes="$sizes${sizes:+,}\"$path\":$(size "$tmp/files/${path##*/}")"
+        done
+        printf '{"files":{%s}}' "$sizes" >"$tmp/begin"
         call POST /api/update/begin "$tmp/begin"
-        for path in bin/tetrad $(for s in $scripts; do echo "launcher/$s"; done); do
-            file=$dir/${path##*/}
+        for path in $list; do
+            file=$tmp/files/${path##*/}
             total=$(size "$file")
             offset=0
             while [ "$offset" -lt "$total" ]; do

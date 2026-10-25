@@ -9,6 +9,7 @@ use std::process::Command;
 use tetrad_services::updater::tetrad::Manifest;
 
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/dev-update.sh");
+const BUILD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/build-dev.sh");
 
 fn run(args: &[&Path]) -> Option<String> {
     let output = Command::new("sh").arg(SCRIPT).args(args).output().ok()?;
@@ -59,5 +60,127 @@ fn a_packed_update_verifies_with_the_printed_key_only() {
     assert!(Manifest::verify(&manifest, &signature, &other_key, None).is_err());
     let changed = String::from_utf8(manifest).unwrap().replace("1234", "1235");
     assert!(Manifest::verify(changed.as_bytes(), &signature, &public_key, None).is_err());
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The names in a tar.gz, in order.
+fn listing(archive: &Path) -> Vec<String> {
+    let output = Command::new("tar")
+        .arg("-tzf")
+        .arg(archive)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `archive` makes one file: the binary alone, or with the three launcher scripts. The files
+/// are flat (the Remote page takes them by name) and the contents are the build's.
+#[test]
+fn an_archive_has_the_binary_and_with_scripts_the_launchers() {
+    let dir = std::env::temp_dir().join(format!("tetrad-dev-archive-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let binary = dir.join("tetrad");
+    fs::write(&binary, vec![5_u8; 777]).unwrap();
+
+    let default = dir.join("tetrad-update.tar.gz");
+    run(&[Path::new("archive"), &binary]).unwrap();
+    assert_eq!(listing(&default), ["tetrad"]);
+
+    let all = dir.join("all.tar.gz");
+    run(&[Path::new("archive"), &binary, Path::new("--scripts"), &all]).unwrap();
+    let names = [
+        "tetrad",
+        "tetrad-launch.sh",
+        "tetrad-launcher.sh",
+        "tetrad-update.sh",
+    ];
+    assert_eq!(listing(&all), names);
+    let out = dir.join("out");
+    fs::create_dir_all(&out).unwrap();
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(&all)
+        .arg("-C")
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(fs::read(out.join("tetrad")).unwrap(), vec![5_u8; 777]);
+    let launcher = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/launcher/tetrad-launcher.sh"
+    );
+    assert_eq!(
+        fs::read(out.join("tetrad-launcher.sh")).unwrap(),
+        fs::read(launcher).unwrap()
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `build-dev.sh` runs `build-arm.sh` with `--features dev` on its `zigbuild` call only, and
+/// leaves `tetrad-update.tar.gz` beside the binary.
+#[test]
+fn a_dev_build_ends_with_the_update_archive() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("tetrad-dev-build-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let (bin, out) = (dir.join("bin"), dir.join("out"));
+    fs::create_dir_all(&bin).unwrap();
+    let calls = dir.join("calls");
+    let write = |path: &Path, text: &str| {
+        fs::write(path, text).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    // The cargo-zigbuild of the environment records its arguments; build-arm.sh calls it as the
+    // real one does, once for the version and once to build, and writes the binary.
+    write(
+        &bin.join("cargo-zigbuild"),
+        &format!("#!/bin/sh\necho \"$*\" >>{}\n", calls.display()),
+    );
+    let build_arm = dir.join("build-arm.sh");
+    write(
+        &build_arm,
+        "#!/bin/sh\ncargo-zigbuild --version\n\
+         cargo-zigbuild zigbuild --locked --release -p tetrad-app --bin tetrad\n\
+         mkdir -p \"$2\" && echo elf >\"$2/tetrad\"\n",
+    );
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let output = Command::new("sh")
+        .arg(BUILD)
+        .arg("--scripts")
+        .arg(&out)
+        .env("PATH", path)
+        .env("TD_BUILD_ARM", &build_arm)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fs::read_to_string(&calls).unwrap();
+    let lines: Vec<_> = calls.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "--version",
+            "zigbuild --locked --release -p tetrad-app --bin tetrad --features dev"
+        ]
+    );
+    assert_eq!(
+        listing(&out.join("tetrad-update.tar.gz")),
+        [
+            "tetrad",
+            "tetrad-launch.sh",
+            "tetrad-launcher.sh",
+            "tetrad-update.sh"
+        ]
+    );
     fs::remove_dir_all(&dir).unwrap();
 }

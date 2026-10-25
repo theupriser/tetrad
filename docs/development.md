@@ -81,50 +81,55 @@ without Nix.
 ### Dev build
 
 `--features dev` makes a dev build: the boot selector gets a third button, Tetrad dev, and
-`tetrad run --dev` writes loop and frame statistics (`perf`, every 10 s) to the log. A release
-build has neither, and the release workflow does not turn the feature on. `build-arm.sh` has no
-option for features (it belongs to the `qc-dev` repository), so run the build command that it
-runs with `--features dev` added: `cargo-zigbuild zigbuild --locked --release --target
-armv7-unknown-linux-gnueabihf.2.18 -p tetrad-app --bin tetrad --features dev`, in `nix develop`.
-On the host: `cargo test --locked -p tetrad-app -p tetrad-ui --features dev`.
+`tetrad run --dev` writes loop and frame statistics (`perf`, every 10 s) to the log. The Remote
+page also takes a Tetrad update, and gives the log ([remote.md](remote.md#update-tetrad-dev-build)).
+A release build has none of this, and the release workflow does not turn the feature on.
 
-Releases: a `v*` tag runs `.github/workflows/release.yml`. It builds `tetrad`, checks it and
+`scripts/build-dev.sh` builds it for the unit and makes the update archive:
+
+```sh
+nix develop path:./qc-dev -c ./scripts/build-dev.sh --scripts dist-dev
+```
+
+`dist-dev/` then has `tetrad`, `tetrad.sha256` and `tetrad-update.tar.gz` (the binary, and with
+`--scripts` the launcher scripts of the checkout). `qc-dev/build-arm.sh` has no option for
+features (it belongs to the `qc-dev` repository), so the script puts a `cargo-zigbuild`
+stand-in in front of it that adds `--features dev`; every other step is the release build. On the
+host: `cargo test --locked -p tetrad-app -p tetrad-ui --features dev`.
+
+### Your own updates
+
+The first dev build goes onto the unit once, by hand (`scripts/install.sh update` over SSH, or
+the storage card in a computer: copy `bin/tetrad` and the scripts to `tetrad/` on partition 4 and
+run `tetrad-launcher.sh arm`, which writes the md5 of the binary into `launcher/select`). After
+that, `tetrad-update.tar.gz` goes to the unit over Wi-Fi: with the Remote page
+([remote.md](remote.md#update-tetrad-dev-build)), or `scripts/dev-update.sh push`. Then touch
+UPDATE TETRAD on the unit.
+
+Over USB, `tetrad-usb install` takes only files that the key built into the unit's Tetrad
+signed. A build can have its own key (a private one that only you have):
+
+1. `scripts/dev-update.sh key ~/tetrad-dev.pem` makes the key and prints
+   `TETRAD_RELEASE_PUBKEY=<public key>`.
+2. Build with that variable set. The build then trusts only your key: it does not accept the
+   releases of `JudahZF/tetrad`, and the Tetrad Updates page refuses them. A build without the
+   variable (every release) is unchanged.
+3. `scripts/dev-update.sh pack DIR ~/tetrad-dev.pem` adds the launcher scripts and writes the
+   signed `tetrad-update.json` and `tetrad-update.json.sig`. `tetrad-usb install DIR` sends
+   the six files ([usb.md](usb.md#install-a-release-over-usb)).
+
+Tests: `cargo test --locked -p tetrad-app --test dev_update_script` runs the scripts (key, pack,
+archive, and the dev build with a stand-in for `build-arm.sh`) and checks a packed update with
+the code of the unit.
+
+### Releases
+
+A `v*` tag runs `.github/workflows/release.yml`. It builds `tetrad`, checks it and
 attaches `tetrad`, `tetrad.sha256`, the release archive `tetrad-<tag>-armv7.tar.gz` and its
 `.sha256` to the [GitHub release](https://github.com/JudahZF/tetrad/releases). The archive has `bin/tetrad`,
 `launcher/*.sh`, `scripts/install.sh`, `scripts/qc-ssh-proxy.py`, the install, launcher and
 update guides in `docs/`, the README images in `docs/images/`, `README.md`, `CHANGELOG.md` and
 `LICENSE`.
-
-### Your own updates
-
-The unit installs a Tetrad update only when the manifest `tetrad-update.json` carries a valid
-signature (`tetrad-update.json.sig`) of the key that is built into its Tetrad. The release key
-is the default, so a build of your own is not accepted. To install your own builds without
-SSH, give the build your own key:
-
-1. Make a key and read its public part: `scripts/dev-update.sh key ~/tetrad-dev.pem`. It prints
-   `TETRAD_RELEASE_PUBKEY=<public key>`. Keep the `.pem` file private.
-2. Build with that variable set, for example
-   `TETRAD_RELEASE_PUBKEY=<public key> cargo-zigbuild ... --features dev` (see
-   [Dev build](#dev-build)). A build with the variable trusts only your key: it does not
-   accept the releases of `JudahZF/tetrad`, and the Tetrad Updates page refuses them. A build
-   without the variable (every release) is unchanged.
-3. Put that first build on the unit once, with `scripts/install.sh update` or with the storage
-   card in a computer: the unit still has the release key, so no update can bring it in.
-4. For each next build: copy the binary to a folder as `tetrad` and run
-   `scripts/dev-update.sh pack DIR ~/tetrad-dev.pem`. It adds the three launcher scripts and
-   writes `tetrad-update.json` and `tetrad-update.json.sig`. The unit takes the six files over
-   Wi-Fi with the Remote page of a dev build ([remote.md](remote.md#update-tetrad-dev-build)),
-   with no browser by `scripts/dev-update.sh push DIR <unit IP> <PIN>` (the PIN is the one that
-   Settings → System → Remote shows now), or over USB with `tetrad-usb install DIR`
-   ([usb.md](usb.md#install-a-release-over-usb)).
-5. On the unit, open Settings → System → Tetrad Updates and touch UPDATE TETRAD.
-
-Tests: `cargo test --locked -p tetrad-app --test dev_update_script` signs a build with a new
-key and checks it with the code of the unit. The test of the staged update in
-`tests/device_remote.rs` needs a build that trusts its test key; without it the test says so
-and skips: `TETRAD_RELEASE_PUBKEY=/RckOFqgx1tk+3jNYC+h2ZH96/drE8WO1wLqyDXp9hg= cargo test
---locked -p tetrad-app --features dev --test device_remote`.
 
 ### Extensions
 
