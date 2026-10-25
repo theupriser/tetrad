@@ -106,6 +106,31 @@ pub enum TetradUpdateError {
     File(#[from] FileError),
 }
 
+/// Checks the base64 Ed25519 `signature` of `message` against the base64 public `key`: the
+/// check of a manifest, and of a key that asks the Remote page of a dev build for its PIN.
+pub fn verify_signature(
+    key: &str,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), TetradUpdateError> {
+    let bad = TetradUpdateError::Signature;
+    let decode = |text: &[u8]| {
+        let text = std::str::from_utf8(text).map_err(|_| bad("not UTF-8"))?;
+        BASE64.decode(text.trim()).map_err(|_| bad("not base64"))
+    };
+    let key: [u8; 32] = (decode(key.as_bytes())?.try_into()).map_err(|_| bad("bad key"))?;
+    let key = VerifyingKey::from_bytes(&key).map_err(|_| bad("bad key"))?;
+    let signature = Signature::from_slice(&decode(signature)?).map_err(|_| bad("not 64 bytes"))?;
+    (key.verify_strict(message, &signature)).map_err(|_| bad("does not match the key"))
+}
+
+/// Whether `key` is a base64 Ed25519 public key.
+pub fn is_public_key(key: &str) -> bool {
+    let bytes = BASE64.decode(key.trim()).ok();
+    let bytes: Option<[u8; 32]> = bytes.and_then(|bytes| bytes.try_into().ok());
+    bytes.is_some_and(|bytes| VerifyingKey::from_bytes(&bytes).is_ok())
+}
+
 /// What [`MANIFEST`] says about one file.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -130,16 +155,7 @@ impl Manifest {
         key: &str,
         version: Option<&Version>,
     ) -> Result<Self, TetradUpdateError> {
-        let bad = TetradUpdateError::Signature;
-        let decode = |text: &[u8]| {
-            let text = std::str::from_utf8(text).map_err(|_| bad("not UTF-8"))?;
-            BASE64.decode(text.trim()).map_err(|_| bad("not base64"))
-        };
-        let key: [u8; 32] = (decode(key.as_bytes())?.try_into()).map_err(|_| bad("bad key"))?;
-        let key = VerifyingKey::from_bytes(&key).map_err(|_| bad("bad key"))?;
-        let signature =
-            Signature::from_slice(&decode(signature)?).map_err(|_| bad("not 64 bytes"))?;
-        (key.verify_strict(json, &signature)).map_err(|_| bad("does not match the release key"))?;
+        verify_signature(key, json, signature)?;
         Self::parse(json, version)
     }
 

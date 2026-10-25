@@ -227,3 +227,175 @@ fn an_empty_post_has_a_content_length() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// Reads one request: the head (lowercased) and the body, by its Content-Length.
+#[cfg(feature = "dev")]
+fn read_request(stream: &mut std::net::TcpStream) -> (String, String) {
+    use std::io::Read;
+    let mut data = Vec::new();
+    let mut byte = [0; 1];
+    while !data.ends_with(b"\r\n\r\n") {
+        assert_eq!(stream.read(&mut byte).unwrap(), 1);
+        data.push(byte[0]);
+    }
+    let head = String::from_utf8(data).unwrap().to_lowercase();
+    let length = (head.lines())
+        .find_map(|line| {
+            line.strip_prefix("content-length: ")
+                .map(|n| n.parse().unwrap())
+        })
+        .unwrap_or(0);
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).unwrap();
+    (head, String::from_utf8(body).unwrap())
+}
+
+#[cfg(feature = "dev")]
+fn respond(stream: &mut std::net::TcpStream, status: &str, body: &str) {
+    use std::io::Write;
+    let text = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(text.as_bytes()).unwrap();
+}
+
+/// `authorize` sends the public key with the PIN; `key:KEY.pem` in place of the PIN gets a
+/// challenge, signs it with `openssl`, and the unit's own check accepts the signature over the
+/// bytes the unit builds (`AUTH_DOMAIN` and the challenge), then the call goes with that PIN.
+#[cfg(feature = "dev")]
+#[test]
+fn a_key_authorizes_and_gets_the_pin_from_the_unit() {
+    use std::net::TcpListener;
+    if Command::new("openssl").arg("version").output().is_err() {
+        eprintln!("skipped: no openssl");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tetrad-dev-keyauth-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let key = dir.join("key.pem");
+    let out = run(&[Path::new("key"), &key]).unwrap();
+    let public = out
+        .lines()
+        .next()
+        .unwrap()
+        .trim_start_matches("public key: ")
+        .to_owned();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let expected = public.clone();
+    let server = std::thread::spawn(move || {
+        const NONCE: &str = "00112233445566778899aabbccddeeff";
+        // authorize: POST /api/keys with the PIN and the public key.
+        let (mut stream, _) = listener.accept().unwrap();
+        let (head, body) = read_request(&mut stream);
+        assert!(head.starts_with("post /api/keys "), "{head}");
+        assert!(head.contains("x-tetrad-pin: 4321"), "{head}");
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["key"], expected.as_str());
+        respond(&mut stream, "200 OK", r#"{"keys":1}"#);
+        // install with key:...: a challenge, the signed answer, then the call with the PIN.
+        let (mut stream, _) = listener.accept().unwrap();
+        let (head, _) = read_request(&mut stream);
+        assert!(head.starts_with("get /api/auth/nonce "), "{head}");
+        respond(&mut stream, "200 OK", &format!(r#"{{"nonce":"{NONCE}"}}"#));
+        let (mut stream, _) = listener.accept().unwrap();
+        let (head, body) = read_request(&mut stream);
+        assert!(head.starts_with("post /api/auth/pin "), "{head}");
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["key"], expected.as_str());
+        assert_eq!(value["nonce"], NONCE);
+        let message = format!("{}{NONCE}", tetrad_remote::AUTH_DOMAIN);
+        let verified = tetrad_services::updater::tetrad::verify_signature(
+            value["key"].as_str().unwrap(),
+            message.as_bytes(),
+            value["signature"].as_str().unwrap().as_bytes(),
+        );
+        assert!(verified.is_ok(), "{verified:?}");
+        respond(&mut stream, "200 OK", r#"{"pin":"4321"}"#);
+        let (mut stream, _) = listener.accept().unwrap();
+        let (head, _) = read_request(&mut stream);
+        assert!(head.starts_with("post /api/update/install "), "{head}");
+        assert!(head.contains("x-tetrad-pin: 4321"), "{head}");
+        respond(&mut stream, "200 OK", r#"{"installing":true}"#);
+    });
+    let host = Path::new(&address);
+    let pin = Path::new("4321");
+    run(&[Path::new("authorize"), host, pin, &key]).unwrap();
+    let by_key = format!("key:{}", key.display());
+    run(&[Path::new("install"), host, Path::new(&by_key)]).unwrap();
+    server.join().unwrap();
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A request that the network drops (the connection ends with no answer) ends that attempt of a
+/// push; the next one starts over from `begin` and cuts the file in pieces of another size, so
+/// a drop that depends on where a piece starts does not repeat. A refusal of the unit is not
+/// retried.
+#[cfg(feature = "dev")]
+#[test]
+fn a_push_starts_over_with_other_pieces_when_one_is_dropped() {
+    use std::net::TcpListener;
+    let dir = std::env::temp_dir().join(format!("tetrad-dev-retry-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let binary = dir.join("tetrad");
+    fs::write(&binary, vec![9_u8; 100_000]).unwrap();
+    let archive = dir.join("u.tar.gz");
+    run(&[Path::new("archive"), &binary, &archive]).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let server = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        let mut dropped = false;
+        loop {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (head, _) = read_request(&mut stream);
+            let line = head.lines().next().unwrap().to_owned();
+            seen.push(line.clone());
+            if line.contains("offset=49152") && !dropped {
+                dropped = true;
+                continue; // the connection ends with no answer
+            }
+            let body = if line.contains("/api/update ") {
+                r#"{"version":"0.1.0","select":null}"#
+            } else {
+                r#"{"ok":true}"#
+            };
+            respond(&mut stream, "200 OK", body);
+            if line.contains("/api/update/ready") {
+                return seen;
+            }
+        }
+    });
+    let output = Command::new("sh")
+        .args([SCRIPT, "push"])
+        .arg(&archive)
+        .args([&address, "1234"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let seen = server.join().unwrap();
+    let steps: Vec<&str> = seen
+        .iter()
+        .map(|line| line.split(' ').nth(1).unwrap())
+        .collect();
+    let begins = steps.iter().filter(|step| step.ends_with("/begin")).count();
+    assert_eq!(begins, 2, "{steps:?}");
+    let offsets: Vec<&str> = steps
+        .iter()
+        .filter_map(|s| s.split("offset=").nth(1))
+        .collect();
+    // First attempt: 0, then the dropped 49152. Second attempt: pieces of 40000.
+    assert_eq!(offsets, ["0", "49152", "0", "40000", "80000"], "{steps:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("dropped"));
+    fs::remove_dir_all(&dir).unwrap();
+}

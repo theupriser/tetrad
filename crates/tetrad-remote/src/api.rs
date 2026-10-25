@@ -4,6 +4,11 @@
 /// CORS preflight, which the server does not answer, so other sites cannot post uploads.
 pub const PIN_HEADER: &str = "x-tetrad-pin";
 
+/// What a key signs to get the PIN, before the nonce: another use of the same key cannot be
+/// replayed as a PIN request.
+#[cfg(feature = "dev")]
+pub const AUTH_DOMAIN: &str = "tetrad-remote-pin:";
+
 /// A request that the device answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -43,6 +48,20 @@ pub enum Request {
     /// Dev build: the recent notices of the unit, as plain text.
     #[cfg(feature = "dev")]
     Log { pin: String },
+    /// Dev build, no PIN: a one-time challenge, to be signed by a key that the unit knows.
+    #[cfg(feature = "dev")]
+    AuthNonce,
+    /// Dev build, no PIN: `signature` (base64, Ed25519) of [`AUTH_DOMAIN`] and `nonce` by the
+    /// known `key` (base64) gets the current PIN.
+    #[cfg(feature = "dev")]
+    AuthPin {
+        key: String,
+        nonce: String,
+        signature: String,
+    },
+    /// Dev build: the unit takes this public key (base64) for [`Request::AuthPin`].
+    #[cfg(feature = "dev")]
+    AddKey { pin: String, key: String },
 }
 
 impl Request {
@@ -55,7 +74,11 @@ impl Request {
             | Self::UpdateChunk { pin, .. }
             | Self::UpdateReady { pin }
             | Self::UpdateInstall { pin }
-            | Self::Log { pin } => pin,
+            | Self::Log { pin }
+            | Self::AddKey { pin, .. } => pin,
+            // These two have no PIN: the unit answers them before the PIN check.
+            #[cfg(feature = "dev")]
+            Self::AuthNonce | Self::AuthPin { .. } => "",
         }
     }
 }
@@ -101,6 +124,18 @@ pub enum Reply {
     /// The install runs; the unit restarts when it ends, so this connection is the last answer.
     #[cfg(feature = "dev")]
     UpdateInstalling,
+    #[cfg(feature = "dev")]
+    AuthNonce {
+        nonce: String,
+    },
+    #[cfg(feature = "dev")]
+    AuthPin {
+        pin: String,
+    },
+    #[cfg(feature = "dev")]
+    KeyAdded {
+        keys: usize,
+    },
     /// The notices of the unit, one per line (the answer is `text/plain`).
     #[cfg(feature = "dev")]
     Log {
@@ -139,6 +174,12 @@ impl Reply {
             Self::UpdateStaged { version } => (200, json!({ "version": version })),
             #[cfg(feature = "dev")]
             Self::UpdateInstalling => (200, json!({ "installing": true })),
+            #[cfg(feature = "dev")]
+            Self::AuthNonce { nonce } => (200, json!({ "nonce": nonce })),
+            #[cfg(feature = "dev")]
+            Self::AuthPin { pin } => (200, json!({ "pin": pin })),
+            #[cfg(feature = "dev")]
+            Self::KeyAdded { keys } => (200, json!({ "keys": keys })),
             #[cfg(feature = "dev")]
             Self::Log { text } => (200, json!({ "log": text })),
             Self::WrongPin => (401, json!({ "error": "Wrong PIN" })),

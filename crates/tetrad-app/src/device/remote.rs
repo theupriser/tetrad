@@ -19,6 +19,16 @@ use super::{Device, Subsystem};
 /// The on/off setting. The PIN is never stored.
 pub const SETTINGS_FILE: &str = "/media/p4/tetrad/remote.json";
 const MAX_SETTINGS_BYTES: u64 = 4 * 1024;
+/// A dev build: the public keys (base64, one per line) that may ask for the PIN.
+#[cfg(feature = "dev")]
+pub const KEYS_FILE: &str = "/media/p4/tetrad/remote-keys";
+/// A dev build: how long a challenge for a key lasts, and how many wait at once.
+#[cfg(feature = "dev")]
+const NONCE_LIFE: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(feature = "dev")]
+const MAX_NONCES: usize = 4;
+#[cfg(feature = "dev")]
+const MAX_KEYS: usize = 8;
 /// Wrong PINs before the unit makes a new PIN.
 pub const MAX_WRONG_PINS: u8 = 10;
 /// The page sends 1,024 samples (4,142 bytes); the stock extractor keeps no more.
@@ -35,6 +45,10 @@ pub trait RemoteBackend {
     fn reply(&mut self, id: u64, reply: Reply);
     /// A new random 4-digit PIN.
     fn new_pin(&mut self) -> Result<String, String>;
+    /// A dev build: a new random challenge of 32 hexadecimal digits, for a key that asks for the
+    /// PIN.
+    #[cfg(feature = "dev")]
+    fn nonce(&mut self) -> Result<String, String>;
 }
 
 #[derive(Serialize, Deserialize)]
@@ -54,6 +68,9 @@ pub struct Remote {
     wrong: u8,
     status: Option<String>,
     toast: Option<ToastView>,
+    /// Challenges that were given out, each with the time it was given (a challenge works once).
+    #[cfg(feature = "dev")]
+    nonces: Vec<(String, std::time::Duration)>,
 }
 
 impl Remote {
@@ -169,6 +186,17 @@ impl<P: Platform> Device<P> {
     }
 
     fn remote_reply(&mut self, request: Request) -> Reply {
+        // A key asks for the PIN, so these two cannot have one.
+        #[cfg(feature = "dev")]
+        match &request {
+            Request::AuthNonce => return self.remote_auth_nonce(),
+            Request::AuthPin {
+                key,
+                nonce,
+                signature,
+            } => return self.remote_auth_pin(key, nonce, signature),
+            _ => {}
+        }
         let remote = &mut self.bridges.remote;
         let Some(pin) = remote.pin.as_deref() else {
             return Reply::Off;
@@ -196,6 +224,11 @@ impl<P: Platform> Device<P> {
             Request::UpdateBegin { files, .. } => self.remote_update_begin(&files),
             #[cfg(feature = "dev")]
             Request::UpdateInstall { .. } => self.remote_update_install(),
+            #[cfg(feature = "dev")]
+            Request::AddKey { key, .. } => self.remote_add_key(&key),
+            // Answered before the PIN check.
+            #[cfg(feature = "dev")]
+            Request::AuthNonce | Request::AuthPin { .. } => unreachable!("answered above"),
             #[cfg(feature = "dev")]
             Request::Log { .. } => Reply::Log {
                 text: self.remote_log(),
@@ -236,6 +269,118 @@ impl<P: Platform> Device<P> {
             }
             Err(reason) => self.remote_update_refused(reason),
         }
+    }
+
+    /// A challenge for a key that asks for the PIN. Old ones expire, and no more than
+    /// [`MAX_NONCES`] wait: the oldest goes.
+    #[cfg(feature = "dev")]
+    fn remote_auth_nonce(&mut self) -> Reply {
+        use tetrad_dsp_host::session::Clock;
+        if self.bridges.remote.pin.is_none() {
+            return Reply::Off;
+        }
+        let now = self.clock.now();
+        let nonce = match self.platform.remote().map(|backend| backend.nonce()) {
+            Some(Ok(nonce)) => nonce,
+            Some(Err(reason)) => return Reply::Refused(reason),
+            None => return Reply::Off,
+        };
+        let nonces = &mut self.bridges.remote.nonces;
+        nonces.retain(|(_, at)| now.saturating_sub(*at) < NONCE_LIFE);
+        while nonces.len() >= MAX_NONCES {
+            nonces.remove(0);
+        }
+        nonces.push((nonce.clone(), now));
+        Reply::AuthNonce { nonce }
+    }
+
+    /// The PIN for a known key that signed a challenge of this unit. The challenge is used up by
+    /// the attempt, right or wrong.
+    #[cfg(feature = "dev")]
+    fn remote_auth_pin(&mut self, key: &str, nonce: &str, signature: &str) -> Reply {
+        use tetrad_dsp_host::session::Clock;
+        let Some(pin) = self.bridges.remote.pin.clone() else {
+            return Reply::Off;
+        };
+        let now = self.clock.now();
+        let nonces = &mut self.bridges.remote.nonces;
+        let fresh = (nonces.iter())
+            .position(|(known, at)| known == nonce && now.saturating_sub(*at) < NONCE_LIFE)
+            .is_some();
+        nonces.retain(|(known, _)| known != nonce);
+        let short: String = key.chars().take(8).collect();
+        let verdict = if !fresh {
+            Err("the challenge is unknown or too old")
+        } else if !self.remote_keys().iter().any(|known| known == key.trim()) {
+            Err("this key is not known to the unit")
+        } else {
+            let message = format!("{}{nonce}", tetrad_remote::AUTH_DOMAIN);
+            tetrad_services::updater::tetrad::verify_signature(
+                key,
+                message.as_bytes(),
+                signature.as_bytes(),
+            )
+            .map_err(|_| "the signature does not match")
+        };
+        match verdict {
+            Ok(()) => {
+                self.notice(
+                    Subsystem::Remote,
+                    format!("Remote: key {short}… got the PIN"),
+                );
+                Reply::AuthPin { pin }
+            }
+            Err(reason) => {
+                let notice = format!("Remote: key {short}… refused: {reason}");
+                self.notice(Subsystem::Remote, notice);
+                Reply::Refused(reason.to_owned())
+            }
+        }
+    }
+
+    /// The public keys in [`KEYS_FILE`].
+    #[cfg(feature = "dev")]
+    fn remote_keys(&mut self) -> Vec<String> {
+        use tetrad_services::exec::Files;
+        let path = Path::new(KEYS_FILE);
+        let bytes = (self.platform.services().files().read_bounded(path, 4096))
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        (String::from_utf8_lossy(&bytes).lines())
+            .map(|line| line.trim().to_owned())
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
+    /// Takes a public key for the PIN requests. The PIN already proved who asks.
+    #[cfg(feature = "dev")]
+    fn remote_add_key(&mut self, key: &str) -> Reply {
+        use tetrad_services::exec::Files;
+        let key = key.trim();
+        if !tetrad_services::updater::tetrad::is_public_key(key) {
+            return Reply::Refused("not a base64 Ed25519 public key".into());
+        }
+        let mut keys = self.remote_keys();
+        if !keys.iter().any(|known| known == key) {
+            if keys.len() >= MAX_KEYS {
+                return Reply::Refused(format!(
+                    "{MAX_KEYS} keys are known; remove one on the card"
+                ));
+            }
+            keys.push(key.to_owned());
+            let files = self.platform.services().files();
+            let path = Path::new(KEYS_FILE);
+            let saved = (path.parent())
+                .map_or(Ok(()), |dir| files.create_dirs(dir))
+                .and_then(|()| files.write_atomic(path, (keys.join("\n") + "\n").as_bytes()));
+            if let Err(error) = saved {
+                return Reply::Refused(format!("the key is not saved: {error}"));
+            }
+            let short: String = key.chars().take(8).collect();
+            self.notice(Subsystem::Remote, format!("Remote: key {short}… added"));
+        }
+        Reply::KeyAdded { keys: keys.len() }
     }
 
     /// The md5 in `launcher/select`: the binary that the launcher starts.

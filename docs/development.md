@@ -106,6 +106,10 @@ that, `tetrad-update.tar.gz` goes to the unit over Wi-Fi: with the Remote page
 ([remote.md](remote.md#update-tetrad-dev-build)), or `scripts/dev-update.sh push`. Then touch
 UPDATE TETRAD on the unit.
 
+For scripts, a dev build gives its PIN to a key that you add once with `dev-update.sh
+authorize` ([remote.md](remote.md#without-reading-the-pin-a-key)); then `key:KEYFILE` takes the
+place of the PIN in `push`, `install`, `log` and `status`.
+
 Over USB, `tetrad-usb install` takes only files that the key built into the unit's Tetrad
 signed. A build can have its own key (a private one that only you have):
 

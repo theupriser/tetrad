@@ -8,6 +8,8 @@ mod api;
 mod http;
 mod server;
 
+#[cfg(feature = "dev")]
+pub use api::AUTH_DOMAIN;
 pub use api::{Call, PIN_HEADER, Reply, Request};
 pub use http::{MAX_BODY, serve_one};
 pub use server::Server;

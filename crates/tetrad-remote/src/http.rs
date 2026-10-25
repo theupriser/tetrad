@@ -156,6 +156,34 @@ fn route(head: Head, body: Vec<u8>) -> Result<Route, Fail> {
             pin: device(head.pin)?,
         })),
         #[cfg(feature = "dev")]
+        ("GET", "/api/auth/nonce") => Ok(Route::Device(Request::AuthNonce)),
+        #[cfg(feature = "dev")]
+        ("POST", "/api/auth/pin") => {
+            let bad = || Fail::Status(400, r#"key, nonce and signature required"#);
+            let value: serde_json::Value = serde_json::from_slice(&body).map_err(|_| bad())?;
+            let text = |key: &str| {
+                (value.get(key).and_then(serde_json::Value::as_str))
+                    .map(str::to_owned)
+                    .ok_or_else(bad)
+            };
+            Ok(Route::Device(Request::AuthPin {
+                key: text("key")?,
+                nonce: text("nonce")?,
+                signature: text("signature")?,
+            }))
+        }
+        #[cfg(feature = "dev")]
+        ("POST", "/api/keys") => {
+            let pin = device(head.pin)?;
+            let bad = || Fail::Status(400, r#"key required"#);
+            let value: serde_json::Value = serde_json::from_slice(&body).map_err(|_| bad())?;
+            let key = (value.get("key").and_then(serde_json::Value::as_str)).ok_or_else(bad)?;
+            Ok(Route::Device(Request::AddKey {
+                pin,
+                key: key.to_owned(),
+            }))
+        }
+        #[cfg(feature = "dev")]
         ("GET", "/api/log") => Ok(Route::Device(Request::Log {
             pin: device(head.pin)?,
         })),
@@ -167,6 +195,9 @@ fn route(head: Head, body: Vec<u8>) -> Result<Route, Fail> {
             | "/api/update/chunk"
             | "/api/update/ready"
             | "/api/update/install"
+            | "/api/auth/nonce"
+            | "/api/auth/pin"
+            | "/api/keys"
             | "/api/log",
         ) => Err(Fail::Status(405, "method not allowed")),
         (_, "/api/status" | "/api/irs") => Err(Fail::Status(405, "method not allowed")),
