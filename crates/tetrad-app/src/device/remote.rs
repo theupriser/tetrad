@@ -187,7 +187,62 @@ impl<P: Platform> Device<P> {
                 Err(reason) => Reply::Refused(reason),
             },
             Request::Upload { name, wav, .. } => self.remote_upload(&name, &wav),
+            #[cfg(feature = "dev")]
+            Request::UpdateStatus { .. } => Reply::UpdateStatus {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+            },
+            #[cfg(feature = "dev")]
+            Request::UpdateBegin {
+                manifest,
+                signature,
+                ..
+            } => self.remote_update_begin(&manifest, &signature),
+            #[cfg(feature = "dev")]
+            Request::UpdateChunk {
+                path,
+                offset,
+                bytes,
+                ..
+            } => match self.stage_chunk(&path, offset, &bytes) {
+                Ok(received) => Reply::UpdateReceived { path, received },
+                Err(reason) => self.remote_update_refused(reason),
+            },
+            #[cfg(feature = "dev")]
+            Request::UpdateReady { .. } => match self.stage_ready() {
+                Ok(version) => {
+                    let notice = format!("Remote: Tetrad {version} staged; start it on the unit");
+                    self.notice(Subsystem::Remote, notice);
+                    Reply::UpdateStaged { version }
+                }
+                Err(reason) => self.remote_update_refused(reason),
+            },
         }
+    }
+
+    /// A dev build: starts a staging of the files that the signed manifest lists
+    /// ([`Device::stage_begin`], as the USB install does).
+    #[cfg(feature = "dev")]
+    fn remote_update_begin(&mut self, manifest: &str, signature: &str) -> Reply {
+        match self.stage_begin(manifest, signature) {
+            Ok((version, files)) => {
+                self.notice(
+                    Subsystem::Remote,
+                    format!("Remote: Tetrad {version} update"),
+                );
+                let files = files.into_iter().map(|f| (f.path, f.size)).collect();
+                Reply::UpdateBegun { version, files }
+            }
+            Err(reason) => self.remote_update_refused(reason),
+        }
+    }
+
+    #[cfg(feature = "dev")]
+    fn remote_update_refused(&mut self, reason: String) -> Reply {
+        self.notice(
+            Subsystem::Remote,
+            format!("Remote: update refused: {reason}"),
+        );
+        Reply::Refused(reason)
     }
 
     /// After [`MAX_WRONG_PINS`] wrong PINs: the old PIN no longer works.

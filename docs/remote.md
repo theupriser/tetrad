@@ -24,6 +24,29 @@ Remote stays on after a restart if you leave it on. It gets a new PIN at each st
 port does not open, the switch stays on and the page shows why; turn it off and on to try
 again.
 
+## Update Tetrad (dev build)
+
+A dev build ([development.md](development.md#dev-build)) also takes a Tetrad update on the
+Remote page. A release build has no such part and no way to send it a program.
+
+1. Make the files of your build with `scripts/dev-update.sh pack`
+   ([development.md](development.md#your-own-updates)). The unit must run a build with your
+   key.
+2. Open the Remote page and enter the PIN. A part **Update Tetrad** shows the running version.
+3. Choose or drop all six files: `tetrad`, `tetrad-launch.sh`, `tetrad-launcher.sh`,
+   `tetrad-update.sh`, `tetrad-update.json` and `tetrad-update.json.sig`. The page sends the
+   manifest first. The unit checks its signature with the key of its build and refuses a manifest
+   that another key signed, before it takes a file. Then the page sends each file in 48 KiB
+   parts, and the unit checks the size of each file.
+4. When the page says the update is on the unit, touch UPDATE TETRAD in Settings → System →
+   Tetrad Updates. Nothing installs before that. The unit then checks the SHA-256 value of each
+   file and that the new binary supports the CorOS build, as for an update over USB
+   ([usb.md](usb.md#install-a-release-over-usb)).
+
+A new manifest or a refused step ends the staging: choose the files again. The page uses plain
+HTTP: whoever has the PIN and the signed files can send an update, but only files that your key
+signed install.
+
 ## Files that work
 
 The page converts each file in the browser before the upload, so most IR files work:

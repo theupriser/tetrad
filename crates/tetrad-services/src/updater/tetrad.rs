@@ -44,6 +44,14 @@ pub const SIGNATURE: &str = "tetrad-update.json.sig";
 /// The base64 Ed25519 key that signs releases. The release workflow checks that its secret
 /// key matches this value. A new key needs one install with `scripts/install.sh`.
 pub const RELEASE_KEY: &str = "M4g350Lncizx/83Q9fJVpFZ9oiHvkr/1/2D5fiB8I2o=";
+/// The key this build trusts: [`RELEASE_KEY`], or the base64 Ed25519 key in the environment
+/// variable `TETRAD_RELEASE_PUBKEY` at build time (docs/development.md, "Your own updates").
+/// A build with its own key takes only manifests signed with the matching private key, and not
+/// the releases of [`REPOSITORY`]. The release workflow does not set it.
+pub const TRUSTED_KEY: &str = match option_env!("TETRAD_RELEASE_PUBKEY") {
+    Some(key) => key,
+    None => RELEASE_KEY,
+};
 /// The Tetrad folder on the user data partition.
 pub const HOME: &str = "/media/p4/tetrad";
 /// The files of an update, relative to [`HOME`], in sorted order. A manifest lists exactly
@@ -263,7 +271,7 @@ pub fn check(
     };
     let json = get(http, asset_url(&tag, MANIFEST), MAX_MANIFEST_BYTES)?;
     let signature = get(http, asset_url(&tag, SIGNATURE), MAX_SIGNATURE_BYTES)?;
-    let manifest = Manifest::verify(&json, &signature, RELEASE_KEY, Some(&version))?;
+    let manifest = Manifest::verify(&json, &signature, TRUSTED_KEY, Some(&version))?;
     Ok(Some(Offer {
         source: Source::Release(tag),
         manifest,

@@ -1,0 +1,77 @@
+#!/bin/sh
+# Your own Tetrad updates (docs/development.md, "Your own updates"). The unit installs only a
+# manifest that the key built into its Tetrad signed. This makes your own key, and signs the
+# files of a build with it, so that the Remote page (a dev build) or `tetrad-usb install` can
+# send them. It does what the release workflow does, with your key.
+#
+#   dev-update.sh key KEY.pem
+#       Makes the private key KEY.pem when it is not there, and prints the public key. Build
+#       Tetrad with it: TETRAD_RELEASE_PUBKEY=<public key> cargo ... (or in build-arm.sh's
+#       environment). Keep KEY.pem; nobody else needs it.
+#   dev-update.sh pack DIR KEY.pem
+#       DIR holds the `tetrad` binary of the build. Adds the three launcher scripts,
+#       tetrad-update.json (the version of Cargo.toml, and the size and SHA-256 of each file) and
+#       tetrad-update.json.sig (its Ed25519 signature). Send the six files.
+#
+# Needs OpenSSL 3 (Ed25519 raw signing), base64, and sha256sum or shasum.
+set -eu
+
+here=$(cd -- "$(dirname -- "$0")" && pwd)
+repo=$(cd -- "$here/.." && pwd)
+scripts="tetrad-launch.sh tetrad-launcher.sh tetrad-update.sh"
+
+fail() { echo "dev-update: $*" >&2; exit 1; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+sha256() {
+    if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -c1-64
+    else shasum -a 256 "$1" | cut -c1-64; fi
+}
+size() { wc -c <"$1" | tr -d ' '; }
+b64() { base64 | tr -d '\n'; }
+
+public_key() {
+    openssl pkey -in "$1" -pubout -outform DER | tail -c 32 | b64
+}
+
+case ${1:-} in
+    key)
+        [ $# -eq 2 ] || usage
+        key=$2
+        if [ ! -f "$key" ]; then
+            (umask 077 && openssl genpkey -algorithm ed25519 -out "$key") || fail "cannot make $key"
+            echo "made $key (keep it private)" >&2
+        fi
+        pub=$(public_key "$key")
+        echo "public key: $pub"
+        echo "build with: TETRAD_RELEASE_PUBKEY=$pub"
+        ;;
+    pack)
+        [ $# -eq 3 ] || usage
+        dir=$2
+        key=$3
+        [ -f "$dir/tetrad" ] || fail "no $dir/tetrad (build it first)"
+        [ -f "$key" ] || fail "no $key (dev-update.sh key $key makes it)"
+        version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' "$repo/Cargo.toml")
+        [ -n "$version" ] || fail "no version in $repo/Cargo.toml"
+        for s in $scripts; do
+            install -m 755 "$repo/scripts/launcher/$s" "$dir/$s"
+        done
+        # The files of a manifest in sorted order: the binary, then the scripts.
+        entry() { printf '"%s":{"size":%s,"sha256":"%s"}' "$1" "$(size "$2")" "$(sha256 "$2")"; }
+        {
+            printf '{"version":"%s","files":{' "$version"
+            entry bin/tetrad "$dir/tetrad"
+            for s in $scripts; do
+                printf ','
+                entry "launcher/$s" "$dir/$s"
+            done
+            printf '}}'
+        } >"$dir/tetrad-update.json"
+        openssl pkeyutl -sign -inkey "$key" -rawin -in "$dir/tetrad-update.json" | b64 \
+            >"$dir/tetrad-update.json.sig"
+        echo "tetrad $version: signed with the key $(public_key "$key")" >&2
+        echo "send these files of $dir: tetrad $scripts tetrad-update.json tetrad-update.json.sig" >&2
+        ;;
+    *) usage ;;
+esac

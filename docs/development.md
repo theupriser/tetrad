@@ -95,6 +95,35 @@ attaches `tetrad`, `tetrad.sha256`, the release archive `tetrad-<tag>-armv7.tar.
 update guides in `docs/`, the README images in `docs/images/`, `README.md`, `CHANGELOG.md` and
 `LICENSE`.
 
+### Your own updates
+
+The unit installs a Tetrad update only when the manifest `tetrad-update.json` carries a valid
+signature (`tetrad-update.json.sig`) of the key that is built into its Tetrad. The release key
+is the default, so a build of your own is not accepted. To install your own builds without
+SSH, give the build your own key:
+
+1. Make a key and read its public part: `scripts/dev-update.sh key ~/tetrad-dev.pem`. It prints
+   `TETRAD_RELEASE_PUBKEY=<public key>`. Keep the `.pem` file private.
+2. Build with that variable set, for example
+   `TETRAD_RELEASE_PUBKEY=<public key> cargo-zigbuild ... --features dev` (see
+   [Dev build](#dev-build)). A build with the variable trusts only your key: it does not
+   accept the releases of `JudahZF/tetrad`, and the Tetrad Updates page refuses them. A build
+   without the variable (every release) is unchanged.
+3. Put that first build on the unit once, with `scripts/install.sh update` or with the storage
+   card in a computer: the unit still has the release key, so no update can bring it in.
+4. For each next build: copy the binary to a folder as `tetrad` and run
+   `scripts/dev-update.sh pack DIR ~/tetrad-dev.pem`. It adds the three launcher scripts and
+   writes `tetrad-update.json` and `tetrad-update.json.sig`. The unit takes the six files over
+   Wi-Fi with the Remote page of a dev build ([remote.md](remote.md#update-tetrad-dev-build)),
+   or over USB with `tetrad-usb install DIR` ([usb.md](usb.md#install-a-release-over-usb)).
+5. On the unit, open Settings → System → Tetrad Updates and touch UPDATE TETRAD.
+
+Tests: `cargo test --locked -p tetrad-app --test dev_update_script` signs a build with a new
+key and checks it with the code of the unit. The test of the staged update in
+`tests/device_remote.rs` needs a build that trusts its test key; without it the test says so
+and skips: `TETRAD_RELEASE_PUBKEY=/RckOFqgx1tk+3jNYC+h2ZH96/drE8WO1wLqyDXp9hg= cargo test
+--locked -p tetrad-app --features dev --test device_remote`.
+
 ### Extensions
 
 The host tests need no Node.js: they use the packaged extensions in

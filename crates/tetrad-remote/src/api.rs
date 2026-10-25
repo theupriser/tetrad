@@ -15,12 +15,38 @@ pub enum Request {
         name: String,
         wav: Vec<u8>,
     },
+    /// Dev build: the running version, and the proof that the unit takes updates.
+    #[cfg(feature = "dev")]
+    UpdateStatus { pin: String },
+    /// Dev build: the signed manifest and its signature, as the Tetrad updater reads them.
+    #[cfg(feature = "dev")]
+    UpdateBegin {
+        pin: String,
+        manifest: String,
+        signature: String,
+    },
+    /// Dev build: the next bytes of manifest file `path`, which must start at `offset`.
+    #[cfg(feature = "dev")]
+    UpdateChunk {
+        pin: String,
+        path: String,
+        offset: u64,
+        bytes: Vec<u8>,
+    },
+    /// Dev build: every file is here; offer the install on the unit.
+    #[cfg(feature = "dev")]
+    UpdateReady { pin: String },
 }
 
 impl Request {
     pub fn pin(&self) -> &str {
         match self {
             Self::Status { pin } | Self::Upload { pin, .. } => pin,
+            #[cfg(feature = "dev")]
+            Self::UpdateStatus { pin }
+            | Self::UpdateBegin { pin, .. }
+            | Self::UpdateChunk { pin, .. }
+            | Self::UpdateReady { pin } => pin,
         }
     }
 }
@@ -41,6 +67,25 @@ pub enum Reply {
         name: String,
         folder: String,
     },
+    #[cfg(feature = "dev")]
+    UpdateStatus {
+        version: String,
+    },
+    /// The manifest is signed with the key of this build: the files to send, with their sizes.
+    #[cfg(feature = "dev")]
+    UpdateBegun {
+        version: String,
+        files: Vec<(String, u64)>,
+    },
+    #[cfg(feature = "dev")]
+    UpdateReceived {
+        path: String,
+        received: u64,
+    },
+    #[cfg(feature = "dev")]
+    UpdateStaged {
+        version: String,
+    },
     WrongPin,
     Off,
     Refused(String),
@@ -55,6 +100,21 @@ impl Reply {
         match self {
             Self::Status { folder } => (200, json!({ "folder": folder })),
             Self::Added { name, folder } => (200, json!({ "name": name, "folder": folder })),
+            #[cfg(feature = "dev")]
+            Self::UpdateStatus { version } => (200, json!({ "version": version })),
+            #[cfg(feature = "dev")]
+            Self::UpdateBegun { version, files } => {
+                let files: Vec<_> = (files.iter())
+                    .map(|(path, size)| json!({ "path": path, "size": size }))
+                    .collect();
+                (200, json!({ "version": version, "files": files }))
+            }
+            #[cfg(feature = "dev")]
+            Self::UpdateReceived { path, received } => {
+                (200, json!({ "path": path, "received": received }))
+            }
+            #[cfg(feature = "dev")]
+            Self::UpdateStaged { version } => (200, json!({ "version": version })),
             Self::WrongPin => (401, json!({ "error": "Wrong PIN" })),
             Self::Off => (503, json!({ "error": "Remote is off" })),
             Self::Refused(reason) => (422, json!({ "error": reason })),
