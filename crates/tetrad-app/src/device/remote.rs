@@ -194,6 +194,8 @@ impl<P: Platform> Device<P> {
             #[cfg(feature = "dev")]
             Request::UpdateBegin { files, .. } => self.remote_update_begin(&files),
             #[cfg(feature = "dev")]
+            Request::UpdateInstall { .. } => self.remote_update_install(),
+            #[cfg(feature = "dev")]
             Request::Log { .. } => Reply::Log {
                 text: self.remote_log(),
             },
@@ -232,6 +234,25 @@ impl<P: Platform> Device<P> {
                 Reply::UpdateBegun { version, files }
             }
             Err(reason) => self.remote_update_refused(reason),
+        }
+    }
+
+    /// A dev build: UPDATE TETRAD without the touch, for the files that `ready` offered. The
+    /// same command as the button, so it has the same refusals (no offer, a CorOS update).
+    #[cfg(feature = "dev")]
+    fn remote_update_install(&mut self) -> Reply {
+        let command = tetrad_ui::UiCommand::TetradUpdate {
+            command: tetrad_ui::TetradUpdateCommand::Install,
+        };
+        use tetrad_dsp_host::session::Clock;
+        let now = self.clock.now();
+        match self.handoff(super::ui::Handoff::Services(command), now) {
+            Ok(effects) => {
+                self.notice(Subsystem::Remote, "Remote: install started".to_owned());
+                self.apply(Ok::<_, super::DeviceError>(effects));
+                Reply::UpdateInstalling
+            }
+            Err(error) => self.remote_update_refused(error.to_string()),
         }
     }
 

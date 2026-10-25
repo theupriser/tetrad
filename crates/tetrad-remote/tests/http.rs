@@ -277,6 +277,14 @@ fn the_update_routes_reach_the_device() {
     assert_eq!(status, "HTTP/1.1 200 OK");
     assert_eq!(seen, Some(Request::UpdateReady { pin: pin() }));
 
+    let (status, response, seen) = exchange(
+        head("POST", "/api/update/install", "").as_bytes(),
+        Reply::UpdateInstalling,
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(response.ends_with(r#"{"installing":true}"#));
+    assert_eq!(seen, Some(Request::UpdateInstall { pin: pin() }));
+
     // A refusal of the device is a 422 with its reason.
     let refused = Reply::Refused("no install-begin".into());
     let (status, response, _) = exchange(head("POST", "/api/update/ready", "").as_bytes(), refused);

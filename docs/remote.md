@@ -50,9 +50,17 @@ From a terminal: `scripts/dev-update.sh push tetrad-update.tar.gz <unit IP> <PIN
 steps, and `scripts/dev-update.sh log <unit IP> <PIN>` prints the recent notices of the unit (the
 log), which a dev build also gives at `GET /api/log`.
 
-Nobody signs these files. What protects the unit is the PIN, that this exists only in dev builds,
-and your touch on the unit. The page uses plain HTTP: anyone on your network who knows the PIN
-can stage a program, but it installs only when someone touches UPDATE TETRAD. A launcher script
+A dev build can also start the install without the touch: `POST /api/update/install` (with the PIN)
+does what UPDATE TETRAD does, with the same refusals (no staged files, a CorOS update running),
+and the unit restarts when it is done. `scripts/dev-update.sh install <unit IP> <PIN>` calls it,
+and `push ... --install` sends the files and starts the install. So a build can be sent, installed
+and checked in the log with no one at the unit. A build that does not start leaves the unit to
+the launcher: three starts in a row that never confirm start-up bring back stock CorOS
+([launcher.md](launcher.md#recovery)).
+
+Nobody signs these files. What protects the unit is the PIN and that this exists only in dev
+builds; the touch on the unit is the third protection, unless the install call is used. The page uses plain HTTP: anyone on your network who knows the PIN
+can stage a program, and install it with the install call. A launcher script
 runs as root at boot in place of the stock start, and `sh -n` finds only syntax errors: change
 the scripts rarely, and keep a way back (the SD card in a computer,
 [launcher.md](launcher.md#recovery)). A new `begin` or a refused step ends the staging: send the
