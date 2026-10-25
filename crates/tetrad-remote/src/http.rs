@@ -152,13 +152,21 @@ fn route(head: Head, body: Vec<u8>) -> Result<Route, Fail> {
             pin: device(head.pin)?,
         })),
         #[cfg(feature = "dev")]
+        ("POST", "/api/update/install") => Ok(Route::Device(Request::UpdateInstall {
+            pin: device(head.pin)?,
+        })),
+        #[cfg(feature = "dev")]
         ("GET", "/api/log") => Ok(Route::Device(Request::Log {
             pin: device(head.pin)?,
         })),
         #[cfg(feature = "dev")]
         (
             _,
-            "/api/update" | "/api/update/begin" | "/api/update/chunk" | "/api/update/ready"
+            "/api/update"
+            | "/api/update/begin"
+            | "/api/update/chunk"
+            | "/api/update/ready"
+            | "/api/update/install"
             | "/api/log",
         ) => Err(Fail::Status(405, "method not allowed")),
         (_, "/api/status" | "/api/irs") => Err(Fail::Status(405, "method not allowed")),

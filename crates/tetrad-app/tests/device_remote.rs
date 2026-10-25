@@ -235,6 +235,30 @@ mod update {
         }
     }
 
+    /// The install call is behind the PIN, needs staged files like the button does, and starts
+    /// the install of what `ready` offered.
+    #[test]
+    fn the_install_call_starts_the_staged_install() {
+        let (mut device, _media) = boot_remote(media(), MemFiles::default(), FakeRemote::default());
+        let pin = pin(&mut device);
+        let install = |pin: &str| Request::UpdateInstall { pin: pin.into() };
+        assert_eq!(ask(&mut device, install("9999")), Reply::WrongPin);
+        // Nothing staged: refused, as the button is.
+        let reply = ask(&mut device, install(&pin));
+        assert!(refused(&reply).contains("no Tetrad update"), "{reply:?}");
+
+        let binary = elf(200);
+        ask(&mut device, begin(&pin, &[("bin/tetrad", 200)]));
+        send(&mut device, &pin, "bin/tetrad", &binary);
+        let ready = ask(&mut device, Request::UpdateReady { pin: pin.clone() });
+        assert!(matches!(ready, Reply::UpdateStaged { .. }), "{ready:?}");
+        assert_eq!(ask(&mut device, install(&pin)), Reply::UpdateInstalling);
+        let Reply::Log { text } = ask(&mut device, Request::Log { pin }) else {
+            panic!("the log");
+        };
+        assert!(text.contains("Remote: install started"), "{text}");
+    }
+
     /// The log is behind the PIN and lists the notices, among them what the update did.
     #[test]
     fn the_log_lists_the_notices() {

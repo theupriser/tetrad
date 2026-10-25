@@ -36,6 +36,10 @@ pub enum Request {
     /// Dev build: every file is here; offer the install on the unit.
     #[cfg(feature = "dev")]
     UpdateReady { pin: String },
+    /// Dev build: start the install of the staged files, as UPDATE TETRAD on the unit does. The
+    /// unit restarts when it is done.
+    #[cfg(feature = "dev")]
+    UpdateInstall { pin: String },
     /// Dev build: the recent notices of the unit, as plain text.
     #[cfg(feature = "dev")]
     Log { pin: String },
@@ -50,6 +54,7 @@ impl Request {
             | Self::UpdateBegin { pin, .. }
             | Self::UpdateChunk { pin, .. }
             | Self::UpdateReady { pin }
+            | Self::UpdateInstall { pin }
             | Self::Log { pin } => pin,
         }
     }
@@ -90,6 +95,9 @@ pub enum Reply {
     UpdateStaged {
         version: String,
     },
+    /// The install runs; the unit restarts when it ends, so this connection is the last answer.
+    #[cfg(feature = "dev")]
+    UpdateInstalling,
     /// The notices of the unit, one per line (the answer is `text/plain`).
     #[cfg(feature = "dev")]
     Log {
@@ -124,6 +132,8 @@ impl Reply {
             }
             #[cfg(feature = "dev")]
             Self::UpdateStaged { version } => (200, json!({ "version": version })),
+            #[cfg(feature = "dev")]
+            Self::UpdateInstalling => (200, json!({ "installing": true })),
             #[cfg(feature = "dev")]
             Self::Log { text } => (200, json!({ "log": text })),
             Self::WrongPin => (401, json!({ "error": "Wrong PIN" })),

@@ -17,10 +17,13 @@
 #       binary, and with --scripts the three launcher scripts of this checkout. This is what a
 #       dev build takes over Wi-Fi: unsigned, so it needs no key. scripts/build-dev.sh makes it
 #       after each build.
-#   dev-update.sh push ARCHIVE HOST PIN
+#   dev-update.sh push ARCHIVE HOST PIN [--install]
 #       Sends the files of ARCHIVE to the Remote page of a dev build, as the page does: HOST is
 #       the IP address of the unit, PIN the one that Settings > System > Remote shows. Touch
-#       UPDATE TETRAD on the unit after it.
+#       UPDATE TETRAD on the unit after it, or give --install to start the install from here
+#       (the unit checks the files, installs them and restarts).
+#   dev-update.sh install HOST PIN
+#       Starts the install of the files that a push left on the unit, as UPDATE TETRAD does.
 #   dev-update.sh log HOST PIN
 #       Prints the recent notices of the unit (the log), over the same Remote page of a dev
 #       build.
@@ -35,7 +38,7 @@ repo=$(cd -- "$here/.." && pwd)
 scripts="tetrad-launch.sh tetrad-launcher.sh tetrad-update.sh"
 
 fail() { echo "dev-update: $*" >&2; exit 1; }
-usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 sha256() {
     if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -c1-64
@@ -135,11 +138,26 @@ case ${1:-} in
         tar -C "$tmp" --owner=0 --group=0 --numeric-owner -czf "$out" $names
         echo "$out: $names ($(size "$out") bytes)" >&2
         ;;
+    install)
+        [ $# -eq 3 ] || usage
+        host=$2
+        pin=$3
+        command -v curl >/dev/null || fail "install needs curl"
+        reply=$(mktemp)
+        trap 'rm -f "$reply"' EXIT
+        call POST /api/update/install
+        echo "the install started; the unit restarts when it is done" >&2
+        ;;
     push)
-        [ $# -eq 4 ] || usage
+        [ $# -eq 4 ] || [ $# -eq 5 ] || usage
         archive=$2
         host=$3
         pin=$4
+        install_now=
+        if [ $# -eq 5 ]; then
+            [ "$5" = --install ] || usage
+            install_now=yes
+        fi
         command -v curl >/dev/null || fail "push needs curl"
         [ -f "$archive" ] || fail "no $archive"
         tmp=$(mktemp -d)
@@ -177,7 +195,12 @@ case ${1:-} in
             echo >&2
         done
         call POST /api/update/ready
-        echo "staged; touch UPDATE TETRAD on the unit (Settings > System > Tetrad Updates)" >&2
+        if [ -n "$install_now" ]; then
+            call POST /api/update/install
+            echo "staged; the install started and the unit restarts when it is done" >&2
+        else
+            echo "staged; touch UPDATE TETRAD on the unit (Settings > System > Tetrad Updates)" >&2
+        fi
         ;;
     *) usage ;;
 esac
