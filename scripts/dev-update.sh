@@ -52,10 +52,13 @@ public_key() {
 }
 
 # One request to the Remote page: call METHOD PATH [BODY-FILE]. The body of the answer is in
-# $reply; a status other than 200 stops with the reason that the unit gives.
+# $reply; a status other than 200 stops with the reason that the unit gives. A POST always has a
+# body, empty when there is no file: the server wants Content-Length on every POST.
 call() {
+    data=
+    [ "$1" != POST ] || data=@${3:-/dev/null}
     status=$(curl -sS -m 30 -o "$reply" -w '%{http_code}' -X "$1" -H "X-Tetrad-Pin: $pin" \
-        ${3:+--data-binary "@$3"} "http://$host$2") || fail "the unit at $host is not reachable"
+        ${data:+--data-binary "$data"} "http://$host$2") || fail "the unit at $host is not reachable"
     if [ "$status" != 200 ]; then
         fail "$2: $status $(sed -n 's/.*"error":"\([^"]*\)".*/\1/p' "$reply")"
     fi
