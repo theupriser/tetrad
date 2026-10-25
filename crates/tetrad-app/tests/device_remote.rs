@@ -297,7 +297,21 @@ mod update {
         assert_eq!(ask(&mut device, wrong), Reply::WrongPin);
         let version = env!("CARGO_PKG_VERSION").to_owned();
         let status = ask(&mut device, Request::UpdateStatus { pin: pin.clone() });
-        assert_eq!(status, Reply::UpdateStatus { version });
+        // No `launcher/select` on this fake unit.
+        assert_eq!(
+            status,
+            Reply::UpdateStatus {
+                version: version.clone(),
+                select: None
+            }
+        );
+        files.put(
+            "/media/p4/tetrad/launcher/select",
+            "5ef24effb50eb865412cc5115497a1c0\n",
+        );
+        let status = ask(&mut device, Request::UpdateStatus { pin: pin.clone() });
+        let select = Some("5ef24effb50eb865412cc5115497a1c0".to_owned());
+        assert_eq!(status, Reply::UpdateStatus { version, select });
 
         for (case, files) in [
             ("no files", vec![]),

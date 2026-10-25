@@ -24,6 +24,9 @@
 #       (the unit checks the files, installs them and restarts).
 #   dev-update.sh install HOST PIN
 #       Starts the install of the files that a push left on the unit, as UPDATE TETRAD does.
+#   dev-update.sh status HOST PIN
+#       Prints the version of the running Tetrad and the md5 that the launcher has armed
+#       (launcher/select): after an update, the md5 of the binary that was sent.
 #   dev-update.sh log HOST PIN
 #       Prints the recent notices of the unit (the log), over the same Remote page of a dev
 #       build.
@@ -38,7 +41,7 @@ repo=$(cd -- "$here/.." && pwd)
 scripts="tetrad-launch.sh tetrad-launcher.sh tetrad-update.sh"
 
 fail() { echo "dev-update: $*" >&2; exit 1; }
-usage() { sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 sha256() {
     if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -c1-64
@@ -99,6 +102,17 @@ case ${1:-} in
             >"$dir/tetrad-update.json.sig"
         echo "tetrad $version: signed with the key $(public_key "$key")" >&2
         echo "send these files of $dir: tetrad $scripts tetrad-update.json tetrad-update.json.sig" >&2
+        ;;
+    status)
+        [ $# -eq 3 ] || usage
+        host=$2
+        pin=$3
+        command -v curl >/dev/null || fail "status needs curl"
+        reply=$(mktemp)
+        trap 'rm -f "$reply"' EXIT
+        call GET /api/update
+        echo "version: $(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$reply")"
+        echo "armed:   $(sed -n 's/.*"select":"\([^"]*\)".*/\1/p' "$reply")"
         ;;
     log)
         [ $# -eq 3 ] || usage

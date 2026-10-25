@@ -76,9 +76,12 @@ pub enum Reply {
         name: String,
         folder: String,
     },
+    /// The running version, and the md5 that the launcher has armed (`launcher/select`), which is
+    /// the md5 of the installed `bin/tetrad` when the update went well.
     #[cfg(feature = "dev")]
     UpdateStatus {
         version: String,
+        select: Option<String>,
     },
     /// The unit takes these files: the version it would offer, and the files with their sizes.
     #[cfg(feature = "dev")]
@@ -118,7 +121,9 @@ impl Reply {
             Self::Status { folder } => (200, json!({ "folder": folder })),
             Self::Added { name, folder } => (200, json!({ "name": name, "folder": folder })),
             #[cfg(feature = "dev")]
-            Self::UpdateStatus { version } => (200, json!({ "version": version })),
+            Self::UpdateStatus { version, select } => {
+                (200, json!({ "version": version, "select": select }))
+            }
             #[cfg(feature = "dev")]
             Self::UpdateBegun { version, files } => {
                 let files: Vec<_> = (files.iter())
