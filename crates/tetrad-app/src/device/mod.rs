@@ -32,6 +32,7 @@ pub mod media;
 pub mod meters;
 pub mod midi;
 pub mod owned;
+#[cfg(feature = "perf-log")]
 mod perf;
 pub mod platform;
 mod power;
@@ -1006,6 +1007,7 @@ pub struct Device<P: Platform> {
     /// UI renders (presented or not) since the last [`Self::take_renders`].
     renders: u32,
     /// Loop and frame times for the `perf` log line ([`perf`]).
+    #[cfg(feature = "perf-log")]
     perf: perf::Perf,
     /// When the last input that someone made arrived ([`ACTIVE_HOLD`]).
     interaction_at: Duration,
@@ -1084,6 +1086,7 @@ impl<P: Platform> Device<P> {
             splash_gone: false,
             phase_max: PhaseTimes::default(),
             renders: 0,
+            #[cfg(feature = "perf-log")]
             perf: perf::Perf::default(),
             interaction_at: Duration::ZERO,
             shown_clips: tetrad_ui::GridClips::default(),
@@ -1327,6 +1330,7 @@ impl<P: Platform> Device<P> {
         use probe::{Label, Phase};
         self.last_phases = PhaseTimes::default();
         self.probe.reset();
+        #[cfg(feature = "perf-log")]
         let began = self.clock.now();
         let mut lap = Lap::start();
         self.probe.enter();
@@ -1460,15 +1464,18 @@ impl<P: Platform> Device<P> {
         }
         lap.end(&mut self.last_phases.frame);
         self.phase_max = self.phase_max.max(self.last_phases);
-        let ended = self.clock.now();
-        let probe = &self.probe;
-        self.perf
-            .step(ended.saturating_sub(began), self.last_phases, || {
-                probe.summary(Duration::from_millis(10))
-            });
-        self.perf.sync(self.bridges.ui.take_sync_times());
-        if let Some(line) = self.perf.report(ended) {
-            self.notice(Subsystem::Platform, line);
+        #[cfg(feature = "perf-log")]
+        {
+            let ended = self.clock.now();
+            let probe = &self.probe;
+            self.perf
+                .step(ended.saturating_sub(began), self.last_phases, || {
+                    probe.summary(Duration::from_millis(10))
+                });
+            self.perf.sync(self.bridges.ui.take_sync_times());
+            if let Some(line) = self.perf.report(ended) {
+                self.notice(Subsystem::Platform, line);
+            }
         }
         self.sync_driver_timer();
         // Like the stock zero-interval sender timer, queued Control reports keep the loop awake.
@@ -2963,11 +2970,16 @@ impl<P: Platform> Device<P> {
         // and the LEDs read it.
         custom::sync(&mut self.state);
         self.renders += 1;
+        #[cfg(feature = "perf-log")]
         let started = self.clock.now();
+        #[cfg(feature = "perf-log")]
         let mut rendered = started;
         let presented = match self.bridges.ui.render_for_display(&self.state) {
             Ok(Some(frame)) => {
-                rendered = self.clock.now();
+                #[cfg(feature = "perf-log")]
+                {
+                    rendered = self.clock.now();
+                }
                 (self.platform)
                     .present_rows(frame.rgb, frame.rows)
                     .map_err(DeviceError::platform)
@@ -2975,14 +2987,17 @@ impl<P: Platform> Device<P> {
             Ok(None) => Ok(()),
             Err(error) => Err(error.into()),
         };
-        let finished = self.clock.now();
-        if rendered == started {
-            rendered = finished;
+        #[cfg(feature = "perf-log")]
+        {
+            let finished = self.clock.now();
+            if rendered == started {
+                rendered = finished;
+            }
+            self.perf.frame(
+                rendered.saturating_sub(started),
+                finished.saturating_sub(rendered),
+            );
         }
-        self.perf.frame(
-            rendered.saturating_sub(started),
-            finished.saturating_sub(rendered),
-        );
         if presented.is_err() {
             self.bridges.ui.unshown();
         }

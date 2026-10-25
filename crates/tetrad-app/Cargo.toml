@@ -11,6 +11,11 @@ repository.workspace = true
 name = "tetrad"
 path = "src/main.rs"
 
+[features]
+# Loop and frame statistics in the log (device/perf.rs), for finding what costs CPU and frame time
+# on the unit. Diagnostics only, so it is left out of release builds.
+perf-log = []
+
 [dependencies]
 clap.workspace = true
 serde.workspace = true
