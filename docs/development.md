@@ -115,7 +115,9 @@ SSH, give the build your own key:
    `scripts/dev-update.sh pack DIR ~/tetrad-dev.pem`. It adds the three launcher scripts and
    writes `tetrad-update.json` and `tetrad-update.json.sig`. The unit takes the six files over
    Wi-Fi with the Remote page of a dev build ([remote.md](remote.md#update-tetrad-dev-build)),
-   or over USB with `tetrad-usb install DIR` ([usb.md](usb.md#install-a-release-over-usb)).
+   with no browser by `scripts/dev-update.sh push DIR <unit IP> <PIN>` (the PIN is the one that
+   Settings → System → Remote shows now), or over USB with `tetrad-usb install DIR`
+   ([usb.md](usb.md#install-a-release-over-usb)).
 5. On the unit, open Settings → System → Tetrad Updates and touch UPDATE TETRAD.
 
 Tests: `cargo test --locked -p tetrad-app --test dev_update_script` signs a build with a new

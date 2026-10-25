@@ -43,6 +43,9 @@ Remote page. A release build has no such part and no way to send it a program.
    file and that the new binary supports the CorOS build, as for an update over USB
    ([usb.md](usb.md#install-a-release-over-usb)).
 
+From a terminal, `scripts/dev-update.sh push DIR <unit IP> <PIN>` sends the same six files with
+the same steps and prints each refusal of the unit.
+
 A new manifest or a refused step ends the staging: choose the files again. The page uses plain
 HTTP: whoever has the PIN and the signed files can send an update, but only files that your key
 signed install.
