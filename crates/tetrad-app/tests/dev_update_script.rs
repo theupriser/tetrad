@@ -184,3 +184,46 @@ fn a_dev_build_ends_with_the_update_archive() {
     );
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Every POST of the scripts has a `Content-Length`, an empty one included (`ready`, `install`):
+/// the Remote server answers 411 to a POST without it, as a unit did to the first `ready`.
+#[test]
+fn an_empty_post_has_a_content_length() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut head = vec![0; 2048];
+        let read = stream.read(&mut head).unwrap();
+        let head = String::from_utf8_lossy(&head[..read]).to_lowercase();
+        let (status, body) = if head.starts_with("post /api/update/install ")
+            && head.contains("content-length: 0")
+            && head.contains("x-tetrad-pin: 1234")
+        {
+            ("200 OK", r#"{"installing":true}"#)
+        } else {
+            (
+                "411 Length Required",
+                r#"{"error":"Content-Length required"}"#,
+            )
+        };
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+    let output = Command::new("sh")
+        .args([SCRIPT, "install", &address.to_string(), "1234"])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
