@@ -362,3 +362,74 @@ fn the_log_is_plain_text_behind_the_pin() {
     assert_eq!(status, "HTTP/1.1 401 Unauthorized");
     assert_eq!(seen, None);
 }
+
+/// A key gets the PIN without one: the challenge and the signed answer need no PIN header, and
+/// adding a key needs it.
+#[cfg(feature = "dev")]
+#[test]
+fn the_key_routes_need_no_pin_except_to_add_a_key() {
+    let host = "Host: 192.168.1.20\r\n";
+    let (status, response, seen) = exchange(
+        format!("GET /api/auth/nonce HTTP/1.1\r\n{host}\r\n").as_bytes(),
+        Reply::AuthNonce {
+            nonce: "ab12".into(),
+        },
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(response.ends_with(r#"{"nonce":"ab12"}"#));
+    assert_eq!(seen, Some(Request::AuthNonce));
+
+    let body = r#"{"key":"S0VZ","nonce":"ab12","signature":"U0lH"}"#;
+    let request = format!(
+        "POST /api/auth/pin HTTP/1.1\r\n{host}Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let (status, response, seen) =
+        exchange(request.as_bytes(), Reply::AuthPin { pin: "4821".into() });
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(response.ends_with(r#"{"pin":"4821"}"#));
+    assert_eq!(
+        seen,
+        Some(Request::AuthPin {
+            key: "S0VZ".into(),
+            nonce: "ab12".into(),
+            signature: "U0lH".into(),
+        })
+    );
+
+    let body = r#"{"key":"S0VZ"}"#;
+    let add = |pin: &str| {
+        format!(
+            "POST /api/keys HTTP/1.1\r\n{host}{pin}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    let (status, _, seen) = exchange(add("").as_bytes(), Reply::Off);
+    assert_eq!(status, "HTTP/1.1 401 Unauthorized");
+    assert_eq!(seen, None);
+    let (status, _, seen) = exchange(
+        add("X-Tetrad-Pin: 4821\r\n").as_bytes(),
+        Reply::KeyAdded { keys: 2 },
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_eq!(
+        seen,
+        Some(Request::AddKey {
+            pin: "4821".into(),
+            key: "S0VZ".into()
+        })
+    );
+    // A request that is not JSON, or lacks a field, never reaches the device.
+    for (path, body) in [
+        ("/api/auth/pin", "no"),
+        ("/api/auth/pin", r#"{"key":"x","nonce":"y"}"#),
+    ] {
+        let request = format!(
+            "POST {path} HTTP/1.1\r\n{host}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (status, _, seen) = exchange(request.as_bytes(), Reply::Off);
+        assert_eq!(status, "HTTP/1.1 400 Bad Request", "{body}");
+        assert_eq!(seen, None);
+    }
+}

@@ -58,6 +58,30 @@ and checked in the log with no one at the unit. A build that does not start leav
 the launcher: three starts in a row that never confirm start-up bring back stock CorOS
 ([launcher.md](launcher.md#recovery)).
 
+### Without reading the PIN: a key
+
+The PIN is new at every start of Remote, so a script would need it from you each time. A dev
+build can give it to a key that you add once:
+
+1. `scripts/dev-update.sh key ~/.config/tetrad-dev/remote.pem` makes a private key (it stays on
+   your computer; the `build with:` line it prints is for signed updates over USB and does not
+   matter here) and prints the public key.
+2. `scripts/dev-update.sh authorize <unit IP> <PIN> ~/.config/tetrad-dev/remote.pem` sends the
+   public key to the unit (`POST /api/keys`, with the PIN that the unit shows now). The unit
+   keeps up to 8 public keys, one per line, in `/media/p4/tetrad/remote-keys`.
+3. After that, `key:~/.config/tetrad-dev/remote.pem` takes the place of the PIN in `push`,
+   `install`, `log` and `status`. The script asks the unit for a one-time challenge
+   (`GET /api/auth/nonce`), signs `tetrad-remote-pin:` and the challenge with the private key
+   (Ed25519), and sends the signature (`POST /api/auth/pin`). The unit answers with its PIN when
+   the key is known and the signature matches.
+
+The secret (the private key) never goes over the network. A challenge works once and for 60
+seconds, at most four wait at once, and the unit's log names the key (its first 8 characters) and
+whether it got the PIN, never the signature. The page and the PIN header still use plain HTTP, so
+someone who watches your network when the script then uses the PIN can read that PIN, as with a
+PIN that you type in the page; it is valid until Remote starts again. To take a key away, delete
+its line in `remote-keys` on the card.
+
 Nobody signs these files. What protects the unit is the PIN and that this exists only in dev
 builds; the touch on the unit is the third protection, unless the install call is used. The page uses plain HTTP: anyone on your network who knows the PIN
 can stage a program, and install it with the install call. A launcher script

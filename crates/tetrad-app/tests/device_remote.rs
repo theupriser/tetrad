@@ -235,6 +235,100 @@ mod update {
         }
     }
 
+    /// A key that the PIN added gets the PIN by signing a challenge of the unit: once per
+    /// challenge, only for a known key, only with a matching signature, and not when Remote is
+    /// off.
+    #[test]
+    fn a_known_key_gets_the_pin_by_signing_a_challenge() {
+        use base64::Engine;
+        use ed25519_dalek::{Signer, SigningKey};
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let sign = |key: &SigningKey, nonce: &str| {
+            let message = format!("{}{nonce}", tetrad_remote::AUTH_DOMAIN);
+            b64(&key.sign(message.as_bytes()).to_bytes())
+        };
+        let files = MemFiles::default();
+        let (mut device, _media) = boot_remote(media(), files.clone(), FakeRemote::default());
+        // Off: no challenge.
+        assert_eq!(ask(&mut device, Request::AuthNonce), Reply::Off);
+        let pin = pin(&mut device);
+        let (mine, other) = (
+            SigningKey::from_bytes(&[3; 32]),
+            SigningKey::from_bytes(&[4; 32]),
+        );
+        let mine_pub = b64(&mine.verifying_key().to_bytes());
+        let other_pub = b64(&other.verifying_key().to_bytes());
+        let auth = |key: &str, nonce: &str, signature: String| Request::AuthPin {
+            key: key.into(),
+            nonce: nonce.into(),
+            signature,
+        };
+        let nonce = |device: &mut Device<Sim>| match ask(device, Request::AuthNonce) {
+            Reply::AuthNonce { nonce } => nonce,
+            other => panic!("a challenge: {other:?}"),
+        };
+
+        // Adding a key needs the PIN and a public key; adding it twice keeps one.
+        let add = |pin: &str, key: &str| Request::AddKey {
+            pin: pin.into(),
+            key: key.into(),
+        };
+        assert_eq!(ask(&mut device, add("9999", &mine_pub)), Reply::WrongPin);
+        let bad = ask(&mut device, add(&pin, "not a key"));
+        assert!(refused(&bad).contains("public key"), "{bad:?}");
+        assert_eq!(
+            ask(&mut device, add(&pin, &mine_pub)),
+            Reply::KeyAdded { keys: 1 }
+        );
+        assert_eq!(
+            ask(&mut device, add(&pin, &mine_pub)),
+            Reply::KeyAdded { keys: 1 }
+        );
+        let saved = files.get("/media/p4/tetrad/remote-keys").unwrap();
+        assert_eq!(saved, format!("{mine_pub}\n").into_bytes());
+
+        // The right key and signature: the PIN, and the challenge is used up.
+        let n = nonce(&mut device);
+        let good = auth(&mine_pub, &n, sign(&mine, &n));
+        assert_eq!(
+            ask(&mut device, good.clone()),
+            Reply::AuthPin { pin: pin.clone() }
+        );
+        assert!(refused(&ask(&mut device, good)).contains("challenge"));
+        // A key that is not known, a signature of another key or of another challenge.
+        let n = nonce(&mut device);
+        let unknown = ask(&mut device, auth(&other_pub, &n, sign(&other, &n)));
+        assert!(refused(&unknown).contains("not known"), "{unknown:?}");
+        let n = nonce(&mut device);
+        let wrong = ask(&mut device, auth(&mine_pub, &n, sign(&other, &n)));
+        assert!(refused(&wrong).contains("signature"), "{wrong:?}");
+        let (n, m) = (nonce(&mut device), nonce(&mut device));
+        let swapped = ask(&mut device, auth(&mine_pub, &n, sign(&mine, &m)));
+        assert!(refused(&swapped).contains("signature"), "{swapped:?}");
+        // The signature is of the challenge with the domain in front, not of the bare challenge.
+        let n = nonce(&mut device);
+        let bare = b64(&mine.sign(n.as_bytes()).to_bytes());
+        let reply = ask(&mut device, auth(&mine_pub, &n, bare.clone()));
+        assert!(refused(&reply).contains("signature"), "{reply:?}");
+        // No more than four challenges wait: the oldest is gone.
+        let first = nonce(&mut device);
+        for _ in 0..4 {
+            nonce(&mut device);
+        }
+        let gone = ask(&mut device, auth(&mine_pub, &first, sign(&mine, &first)));
+        assert!(refused(&gone).contains("challenge"), "{gone:?}");
+        // The log names the key, never the signature or the PIN.
+        let Reply::Log { text } = ask(&mut device, Request::Log { pin: pin.clone() }) else {
+            panic!("the log");
+        };
+        assert!(text.contains(&format!("key {}", &mine_pub[..8])), "{text}");
+        assert!(!text.contains(&bare), "{text}");
+        assert!(
+            text.contains("got the PIN") && !text.contains("got the PIN:"),
+            "{text}"
+        );
+    }
+
     /// The install call is behind the PIN, needs staged files like the button does, and starts
     /// the install of what `ready` offered.
     #[test]

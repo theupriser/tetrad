@@ -27,9 +27,16 @@
 #   dev-update.sh status HOST PIN
 #       Prints the version of the running Tetrad and the md5 that the launcher has armed
 #       (launcher/select): after an update, the md5 of the binary that was sent.
+#   dev-update.sh authorize HOST PIN KEY.pem
+#       Gives the unit the public key of KEY.pem (dev-update.sh key makes one), with the PIN that
+#       the unit shows now. Once.
 #   dev-update.sh log HOST PIN
 #       Prints the recent notices of the unit (the log), over the same Remote page of a dev
 #       build.
+#
+# Where a command takes PIN, `key:KEY.pem` works too, once the key is known to the unit
+# (authorize): the unit gives a one-time challenge, the key signs it, and the unit answers with
+# its PIN. The key never leaves your computer, and the PIN is always the one of this start.
 #
 # `key` and `pack` are for builds with their own signing key, which `tetrad-usb install` takes
 # over USB; `archive` and `push` need no key.
@@ -41,7 +48,7 @@ repo=$(cd -- "$here/.." && pwd)
 scripts="tetrad-launch.sh tetrad-launcher.sh tetrad-update.sh"
 
 fail() { echo "dev-update: $*" >&2; exit 1; }
-usage() { sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 sha256() {
     if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -c1-64
@@ -65,6 +72,27 @@ call() {
     if [ "$status" != 200 ]; then
         fail "$2: $status $(sed -n 's/.*"error":"\([^"]*\)".*/\1/p' "$reply")"
     fi
+}
+
+# A PIN of the form key:KEY.pem is fetched with that key (see above); $reply must be set.
+resolve_pin() {
+    case $pin in key:*) ;; *) return 0 ;; esac
+    keyfile=${pin#key:}
+    [ -f "$keyfile" ] || fail "no $keyfile"
+    pin=
+    call GET /api/auth/nonce
+    nonce=$(sed -n 's/.*"nonce":"\([^"]*\)".*/\1/p' "$reply")
+    [ -n "$nonce" ] || fail "no challenge from the unit"
+    message=$(mktemp)
+    printf '%s%s' "tetrad-remote-pin:" "$nonce" >"$message"
+    signature=$(openssl pkeyutl -sign -inkey "$keyfile" -rawin -in "$message" | b64)
+    rm -f "$message"
+    printf '{"key":"%s","nonce":"%s","signature":"%s"}' "$(public_key "$keyfile")" "$nonce" \
+        "$signature" >"$reply.body"
+    call POST /api/auth/pin "$reply.body"
+    rm -f "$reply.body"
+    pin=$(sed -n 's/.*"pin":"\([^"]*\)".*/\1/p' "$reply")
+    [ -n "$pin" ] || fail "no PIN from the unit"
 }
 
 case ${1:-} in
@@ -106,6 +134,19 @@ case ${1:-} in
         echo "tetrad $version: signed with the key $(public_key "$key")" >&2
         echo "send these files of $dir: tetrad $scripts tetrad-update.json tetrad-update.json.sig" >&2
         ;;
+    authorize)
+        [ $# -eq 4 ] || usage
+        host=$2
+        pin=$3
+        keyfile=$4
+        command -v curl >/dev/null || fail "authorize needs curl"
+        [ -f "$keyfile" ] || fail "no $keyfile (dev-update.sh key $keyfile makes it)"
+        reply=$(mktemp)
+        trap 'rm -f "$reply" "$reply.body"' EXIT
+        printf '{"key":"%s"}' "$(public_key "$keyfile")" >"$reply.body"
+        call POST /api/keys "$reply.body"
+        echo "the unit knows the key now; use key:$keyfile where the PIN goes" >&2
+        ;;
     status)
         [ $# -eq 3 ] || usage
         host=$2
@@ -113,6 +154,7 @@ case ${1:-} in
         command -v curl >/dev/null || fail "status needs curl"
         reply=$(mktemp)
         trap 'rm -f "$reply"' EXIT
+        resolve_pin
         call GET /api/update
         echo "version: $(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$reply")"
         echo "armed:   $(sed -n 's/.*"select":"\([^"]*\)".*/\1/p' "$reply")"
@@ -124,6 +166,7 @@ case ${1:-} in
         command -v curl >/dev/null || fail "log needs curl"
         reply=$(mktemp)
         trap 'rm -f "$reply"' EXIT
+        resolve_pin
         call GET /api/log
         cat "$reply"
         ;;
@@ -162,6 +205,7 @@ case ${1:-} in
         command -v curl >/dev/null || fail "install needs curl"
         reply=$(mktemp)
         trap 'rm -f "$reply"' EXIT
+        resolve_pin
         call POST /api/update/install
         echo "the install started; the unit restarts when it is done" >&2
         ;;
@@ -191,6 +235,7 @@ case ${1:-} in
             list="$list $path"
         done
         [ -n "$list" ] || fail "$archive has none of: tetrad $scripts"
+        resolve_pin
         call GET /api/update
         echo "the unit runs Tetrad $(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$reply")" >&2
         sizes=
