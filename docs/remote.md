@@ -50,6 +50,13 @@ From a terminal: `scripts/dev-update.sh push tetrad-update.tar.gz <unit IP> <PIN
 steps, and `scripts/dev-update.sh log <unit IP> <PIN>` prints the recent notices of the unit (the
 log), which a dev build also gives at `GET /api/log`.
 
+A push survives a flaky network: when a request is dropped (the connection ends with no answer),
+`push` starts over from `begin` with the files cut in pieces of another size (49152, 40000, 32768,
+then 24576 bytes), up to four attempts. A drop can depend on where a piece starts: on the first
+unit a build always failed at the same piece (`Scene Bypass Behavior` in a UI string, 1.5 MB in) and went
+through with pieces of 40000 bytes. `TETRAD_CHUNK=<bytes>` sets the size. A refusal by the unit
+is not retried.
+
 A dev build can also start the install without the touch: `POST /api/update/install` (with the PIN)
 does what UPDATE TETRAD does, with the same refusals (no staged files, a CorOS update running),
 and the unit restarts when it is done. `scripts/dev-update.sh install <unit IP> <PIN>` calls it,

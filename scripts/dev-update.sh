@@ -68,7 +68,10 @@ call() {
     data=
     [ "$1" != POST ] || data=@${3:-/dev/null}
     status=$(curl -sS -m 30 -o "$reply" -w '%{http_code}' -X "$1" -H "X-Tetrad-Pin: $pin" \
-        ${data:+--data-binary "$data"} "http://$host$2") || fail "the unit at $host is not reachable"
+        ${data:+--data-binary "$data"} "http://$host$2") || {
+        echo "dev-update: the unit at $host is not reachable" >&2
+        exit 75
+    }
     if [ "$status" != 200 ]; then
         fail "$2: $status $(sed -n 's/.*"error":"\([^"]*\)".*/\1/p' "$reply")"
     fi
@@ -243,20 +246,40 @@ case ${1:-} in
             sizes="$sizes${sizes:+,}\"$path\":$(size "$tmp/files/${path##*/}")"
         done
         printf '{"files":{%s}}' "$sizes" >"$tmp/begin"
-        call POST /api/update/begin "$tmp/begin"
-        for path in $list; do
-            file=$tmp/files/${path##*/}
-            total=$(size "$file")
-            offset=0
-            while [ "$offset" -lt "$total" ]; do
-                dd if="$file" of="$chunk" bs=49152 skip=$((offset / 49152)) count=1 2>/dev/null
-                call POST "/api/update/chunk?path=$(echo "$path" | sed 's|/|%2F|')&offset=$offset" "$chunk"
-                offset=$((offset + $(size "$chunk")))
-                printf '\r%s %s/%s' "${path##*/}" "$offset" "$total" >&2
+        # One attempt: the files, in pieces of $chunk_size bytes (at most 65536, what the unit
+        # takes), from a new begin, which starts the staging over. A piece that the network drops
+        # ends the attempt (the subshell), and the next attempt cuts the files differently:
+        # a drop can depend on where a piece starts, and this one then does not repeat.
+        attempt() {
+            call POST /api/update/begin "$tmp/begin"
+            for path in $list; do
+                file=$tmp/files/${path##*/}
+                total=$(size "$file")
+                offset=0
+                while [ "$offset" -lt "$total" ]; do
+                    dd if="$file" of="$chunk" bs="$chunk_size" skip=$((offset / chunk_size)) count=1 2>/dev/null
+                    call POST "/api/update/chunk?path=$(echo "$path" | sed 's|/|%2F|')&offset=$offset" "$chunk"
+                    offset=$((offset + $(size "$chunk")))
+                    printf '\r%s %s/%s' "${path##*/}" "$offset" "$total" >&2
+                done
+                echo >&2
             done
-            echo >&2
+            call POST /api/update/ready
+        }
+        staged=
+        for chunk_size in ${TETRAD_CHUNK:-49152 40000 32768 24576}; do
+            if (attempt); then
+                staged=yes
+                break
+            else
+                code=$?
+            fi
+            # 75: the network dropped it. Anything else is the unit saying no, which again will not
+            # change.
+            [ "$code" = 75 ] || exit "$code"
+            echo "push: that attempt was dropped; starting over with pieces of the next size" >&2
         done
-        call POST /api/update/ready
+        [ -n "$staged" ] || fail "the files could not be sent"
         if [ -n "$install_now" ]; then
             call POST /api/update/install
             echo "staged; the install started and the unit restarts when it is done" >&2

@@ -330,3 +330,72 @@ fn a_key_authorizes_and_gets_the_pin_from_the_unit() {
     server.join().unwrap();
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A request that the network drops (the connection ends with no answer) ends that attempt of a
+/// push; the next one starts over from `begin` and cuts the file in pieces of another size, so
+/// a drop that depends on where a piece starts does not repeat. A refusal of the unit is not
+/// retried.
+#[cfg(feature = "dev")]
+#[test]
+fn a_push_starts_over_with_other_pieces_when_one_is_dropped() {
+    use std::net::TcpListener;
+    let dir = std::env::temp_dir().join(format!("tetrad-dev-retry-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let binary = dir.join("tetrad");
+    fs::write(&binary, vec![9_u8; 100_000]).unwrap();
+    let archive = dir.join("u.tar.gz");
+    run(&[Path::new("archive"), &binary, &archive]).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let server = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        let mut dropped = false;
+        loop {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (head, _) = read_request(&mut stream);
+            let line = head.lines().next().unwrap().to_owned();
+            seen.push(line.clone());
+            if line.contains("offset=49152") && !dropped {
+                dropped = true;
+                continue; // the connection ends with no answer
+            }
+            let body = if line.contains("/api/update ") {
+                r#"{"version":"0.1.0","select":null}"#
+            } else {
+                r#"{"ok":true}"#
+            };
+            respond(&mut stream, "200 OK", body);
+            if line.contains("/api/update/ready") {
+                return seen;
+            }
+        }
+    });
+    let output = Command::new("sh")
+        .args([SCRIPT, "push"])
+        .arg(&archive)
+        .args([&address, "1234"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let seen = server.join().unwrap();
+    let steps: Vec<&str> = seen
+        .iter()
+        .map(|line| line.split(' ').nth(1).unwrap())
+        .collect();
+    let begins = steps.iter().filter(|step| step.ends_with("/begin")).count();
+    assert_eq!(begins, 2, "{steps:?}");
+    let offsets: Vec<&str> = steps
+        .iter()
+        .filter_map(|s| s.split("offset=").nth(1))
+        .collect();
+    // First attempt: 0, then the dropped 49152. Second attempt: pieces of 40000.
+    assert_eq!(offsets, ["0", "49152", "0", "40000", "80000"], "{steps:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("dropped"));
+    fs::remove_dir_all(&dir).unwrap();
+}
