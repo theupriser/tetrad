@@ -32,8 +32,14 @@ pub mod media;
 pub mod meters;
 pub mod midi;
 pub mod owned;
-#[cfg(feature = "perf-log")]
+#[cfg(feature = "dev")]
 mod perf;
+
+/// Turns on the `perf` log line (`tetrad run --dev`).
+#[cfg(feature = "dev")]
+pub fn enable_perf_log() {
+    perf::enable();
+}
 pub mod platform;
 mod power;
 pub mod preset;
@@ -1007,7 +1013,7 @@ pub struct Device<P: Platform> {
     /// UI renders (presented or not) since the last [`Self::take_renders`].
     renders: u32,
     /// Loop and frame times for the `perf` log line ([`perf`]).
-    #[cfg(feature = "perf-log")]
+    #[cfg(feature = "dev")]
     perf: perf::Perf,
     /// When the last input that someone made arrived ([`ACTIVE_HOLD`]).
     interaction_at: Duration,
@@ -1086,7 +1092,7 @@ impl<P: Platform> Device<P> {
             splash_gone: false,
             phase_max: PhaseTimes::default(),
             renders: 0,
-            #[cfg(feature = "perf-log")]
+            #[cfg(feature = "dev")]
             perf: perf::Perf::default(),
             interaction_at: Duration::ZERO,
             shown_clips: tetrad_ui::GridClips::default(),
@@ -1330,7 +1336,7 @@ impl<P: Platform> Device<P> {
         use probe::{Label, Phase};
         self.last_phases = PhaseTimes::default();
         self.probe.reset();
-        #[cfg(feature = "perf-log")]
+        #[cfg(feature = "dev")]
         let began = self.clock.now();
         let mut lap = Lap::start();
         self.probe.enter();
@@ -1464,7 +1470,7 @@ impl<P: Platform> Device<P> {
         }
         lap.end(&mut self.last_phases.frame);
         self.phase_max = self.phase_max.max(self.last_phases);
-        #[cfg(feature = "perf-log")]
+        #[cfg(feature = "dev")]
         {
             let ended = self.clock.now();
             let probe = &self.probe;
@@ -2970,13 +2976,13 @@ impl<P: Platform> Device<P> {
         // and the LEDs read it.
         custom::sync(&mut self.state);
         self.renders += 1;
-        #[cfg(feature = "perf-log")]
+        #[cfg(feature = "dev")]
         let started = self.clock.now();
-        #[cfg(feature = "perf-log")]
+        #[cfg(feature = "dev")]
         let mut rendered = started;
         let presented = match self.bridges.ui.render_for_display(&self.state) {
             Ok(Some(frame)) => {
-                #[cfg(feature = "perf-log")]
+                #[cfg(feature = "dev")]
                 {
                     rendered = self.clock.now();
                 }
@@ -2987,7 +2993,7 @@ impl<P: Platform> Device<P> {
             Ok(None) => Ok(()),
             Err(error) => Err(error.into()),
         };
-        #[cfg(feature = "perf-log")]
+        #[cfg(feature = "dev")]
         {
             let finished = self.clock.now();
             if rendered == started {

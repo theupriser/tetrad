@@ -1,6 +1,7 @@
 //! Loop statistics for finding what costs CPU and frame time on the unit. Diagnostics only; no
-//! logic reads them. The counters always run (a few additions per pass); a line goes to the log
-//! every [`WINDOW`] only while the file [`FLAG`] exists, so a normal unit logs nothing:
+//! logic reads them. Built only with the `dev` feature. The counters always run (a few additions
+//! per pass); a line goes to the log every [`WINDOW`] only after [`enable`], which `tetrad run
+//! --dev` calls (the "Tetrad dev" boot entry):
 //!
 //! ```text
 //! perf 10.0s: cpu 23.4% steps 940/s renders 12.3/s render 5.1/21ms present 1.9/8ms step max 40ms awake 9.8% [gather 31 reduce 12 apply 0 control 4 views 9 frame 64]
@@ -11,6 +12,7 @@
 //! share of the window that the loop spent in a pass, not in its idle sleep; the brackets split
 //! that time by phase in milliseconds per second.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::PhaseTimes;
@@ -19,8 +21,13 @@ use super::PhaseTimes;
 pub const WINDOW: Duration = Duration::from_secs(10);
 /// The unit of the times in `/proc/self/stat`: `USER_HZ`, 100 on Linux.
 const USER_HZ: f64 = 100.0;
-/// Create this file to turn the log line on, remove it to turn it off.
-pub const FLAG: &str = "/media/p4/tetrad/perf";
+/// Whether the log line is on.
+static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Turns the log line on for the rest of the run.
+pub fn enable() {
+    ENABLED.store(true, Ordering::Relaxed);
+}
 
 /// Time spent in `Ui::sync` (the snapshot rebuild that each input and each frame pays).
 #[derive(Debug, Clone, Copy, Default)]
@@ -105,7 +112,7 @@ impl Perf {
         self.present_max = self.present_max.max(present);
     }
 
-    /// The log line when a window has ended and [`FLAG`] exists. A window always restarts.
+    /// The log line when a window has ended and the line is [`enable`]d. A window always restarts.
     pub fn report(&mut self, now: Duration) -> Option<String> {
         let elapsed = now.saturating_sub(self.since);
         if elapsed < WINDOW {
@@ -119,7 +126,7 @@ impl Perf {
             },
         );
         self.cpu = read_cpu();
-        if !std::path::Path::new(FLAG).exists() {
+        if !ENABLED.load(Ordering::Relaxed) {
             return None;
         }
         let seconds = elapsed.as_secs_f64();
@@ -196,7 +203,7 @@ mod tests {
         perf.step(Duration::from_millis(3), PhaseTimes::default(), String::new);
         perf.frame(Duration::from_millis(5), Duration::from_millis(2));
         assert_eq!(perf.report(Duration::from_secs(1)), None);
-        // The flag file is not there on a host, so the window restarts without a line.
+        // The line is off by default, so the window restarts without a line.
         assert_eq!(perf.report(WINDOW), None);
         assert_eq!(perf.steps, 0);
         assert_eq!(perf.since, WINDOW);

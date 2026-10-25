@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(feature = "perf-log")]
+#[cfg(feature = "dev")]
 use std::time::Instant;
 
 use tetrad_core::conversion::ParameterType;
@@ -239,7 +239,7 @@ pub struct DisplayFrame<'a> {
 pub struct Ui {
     view: UiState,
     /// Time in [`Self::sync`] since the last [`Self::take_sync_times`].
-    #[cfg(feature = "perf-log")]
+    #[cfg(feature = "dev")]
     sync_times: super::perf::SyncTimes,
     /// The kept frame; each render repaints only the changed items.
     renderer: tetrad_ui::Renderer,
@@ -1741,10 +1741,10 @@ impl Ui {
 
     /// Rebuilds the snapshot and hands it to tetrad-ui when it differs.
     fn sync(&mut self, state: &State) -> Result<(), UiError> {
-        #[cfg(feature = "perf-log")]
+        #[cfg(feature = "dev")]
         let started = Instant::now();
         let result = self.sync_inner(state);
-        #[cfg(feature = "perf-log")]
+        #[cfg(feature = "dev")]
         {
             self.sync_times.calls += 1;
             self.sync_times.total += started.elapsed();
@@ -1753,7 +1753,7 @@ impl Ui {
     }
 
     /// Sync time since the last call ([`super::perf`]).
-    #[cfg(feature = "perf-log")]
+    #[cfg(feature = "dev")]
     pub fn take_sync_times(&mut self) -> super::perf::SyncTimes {
         std::mem::take(&mut self.sync_times)
     }
@@ -1869,7 +1869,7 @@ impl Ui {
             notice: self.pending_notice.clone(),
             site: self.site,
         };
-        #[cfg(feature = "perf-log")]
+        #[cfg(feature = "dev")]
         let building = Instant::now();
         let snapshot = project::snapshot(state, &local);
         let mut snapshot = views::apply(&state.views, snapshot);
@@ -1892,22 +1892,22 @@ impl Ui {
         snapshot.licence = self.licence.clone();
         snapshot.add_to_grid = self.add_to_grid.as_ref().map(|mode| mode.cells);
         snapshot.preset_load = self.load;
-        #[cfg(feature = "perf-log")]
+        #[cfg(feature = "dev")]
         let comparing = Instant::now();
-        #[cfg(feature = "perf-log")]
+        #[cfg(feature = "dev")]
         {
             self.sync_times.snapshot += comparing.saturating_duration_since(building);
         }
         let differs = snapshot != *self.view.snapshot();
-        #[cfg(feature = "perf-log")]
+        #[cfg(feature = "dev")]
         let setting = Instant::now();
-        #[cfg(feature = "perf-log")]
+        #[cfg(feature = "dev")]
         {
             self.sync_times.compare += setting.saturating_duration_since(comparing);
         }
         if differs {
             self.view.set_snapshot(snapshot)?;
-            #[cfg(feature = "perf-log")]
+            #[cfg(feature = "dev")]
             {
                 self.sync_times.set += setting.elapsed();
             }

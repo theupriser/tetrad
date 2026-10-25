@@ -12,9 +12,10 @@ name = "tetrad"
 path = "src/main.rs"
 
 [features]
-# Loop and frame statistics in the log (device/perf.rs), for finding what costs CPU and frame time
-# on the unit. Diagnostics only, so it is left out of release builds.
-perf-log = []
+# A dev build: the boot selector offers a third entry, Tetrad dev, which starts `tetrad run --dev`
+# with loop and frame statistics in the log (device/perf.rs). Diagnostics only, so it is left out
+# of release builds.
+dev = ["tetrad-ui/dev"]
 
 [dependencies]
 clap.workspace = true
