@@ -212,7 +212,6 @@ td_launch() {
         sync; } || td_stock "cannot write $TD_HOME/pending"
     td_log "tetrad run, unconfirmed start $starts of $TD_MAX_STARTS"
     td_comm tetrad-launch
-    # shellcheck disable=SC2086 # TD_RUN_ARGS is empty or one word
     "$TD_BIN" run --started "$TD_HOME/pending" $TD_RUN_ARGS
     code=$?
     case $code in
