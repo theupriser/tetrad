@@ -65,6 +65,9 @@ The same PIN protects these calls, and Remote has to be on, as for IRs. The call
 `GET /api/files`, `POST /api/files/chunk?id=<extension id>&name=<file>&offset=<bytes>[&last=1]`
 (the piece is the body) and `POST /api/files/delete?id=<extension id>&name=<file>`.
 
+While Remote runs, the first row of the ⋮ menu (top right of the Grid) shows the PIN, as
+`Remote #1234`. A tap on it opens this page of Settings.
+
 Remote stays on after a restart if you leave it on. It gets a new PIN at each start. If the
 port does not open, the switch stays on and the page shows why; turn it off and on to try
 again.
