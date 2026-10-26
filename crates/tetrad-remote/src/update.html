@@ -1,5 +1,4 @@
-<main>
-  <section id="update" hidden>
+<section id="update" data-tab="Update" data-group="Developer" hidden>
     <h2>Update Tetrad</h2>
     <p class="sub" id="update-version"></p>
     <label class="drop" id="update-drop">
@@ -10,16 +9,16 @@
     </label>
     <progress id="update-progress" max="1" value="0" hidden></progress>
     <p class="message" id="update-message" role="status"></p>
-  </section>
-</main>
+</section>
 <style>
-#update { margin-top: 40px; }
 #update h2 { margin: 0; font-size: 22px; text-transform: uppercase; }
 #update progress { width: 100%; margin-top: 16px; }
 #update .message.ok { color: var(--good); }
 </style>
 <script>
 "use strict";
+// The page of the update lives in the sidebar with the other pages.
+$("panes").append($("update"));
 // Update files of a dev build (docs/remote.md, "Update Tetrad"). Nobody signs them: the unit
 // takes only these four files, checks them, and installs only after someone touches UPDATE
 // TETRAD on the unit.
@@ -40,6 +39,7 @@ function updateMessage(text, ok) {
 async function offerUpdate() {
   const { status, body } = await call("/api/update");
   $("update").hidden = status !== 200;
+  syncTabs();
   if (status === 200) $("update-version").textContent = "The unit runs Tetrad " + body.version + ".";
 }
 
